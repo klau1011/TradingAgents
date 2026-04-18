@@ -18,8 +18,12 @@ def get_YFin_data_online(
     # Create ticker object
     ticker = yf.Ticker(symbol.upper())
 
+    # yfinance 'end' is exclusive, so add 1 day to include end_date
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + relativedelta(days=1)
+    end_date_inclusive = end_dt.strftime("%Y-%m-%d")
+
     # Fetch historical data for the specified date range
-    data = yf_retry(lambda: ticker.history(start=start_date, end=end_date))
+    data = yf_retry(lambda: ticker.history(start=start_date, end=end_date_inclusive))
 
     # Check if data is empty
     if data.empty:
@@ -420,3 +424,100 @@ def get_insider_transactions(
         
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"
+
+
+def get_analyst_recommendations(
+    ticker: Annotated[str, "ticker symbol of the company"]
+):
+    """Get Wall Street analyst recommendations and price targets from yfinance."""
+    try:
+        ticker_obj = yf.Ticker(ticker.upper())
+        sections = []
+
+        # Price targets
+        try:
+            targets = yf_retry(lambda: ticker_obj.analyst_price_targets)
+            if targets is not None and not (isinstance(targets, pd.DataFrame) and targets.empty):
+                sections.append(f"## Analyst Price Targets for {ticker.upper()}")
+                if isinstance(targets, dict):
+                    for k, v in targets.items():
+                        if v is not None:
+                            sections.append(f"{k}: {v}")
+                else:
+                    sections.append(str(targets))
+        except Exception:
+            pass
+
+        # Recommendations summary
+        try:
+            recs = yf_retry(lambda: ticker_obj.recommendations)
+            if recs is not None and not recs.empty:
+                sections.append(f"\n## Recent Analyst Recommendations for {ticker.upper()}")
+                sections.append(recs.head(20).to_csv())
+        except Exception:
+            pass
+
+        # Upgrades / downgrades
+        try:
+            upgrades = yf_retry(lambda: ticker_obj.upgrades_downgrades)
+            if upgrades is not None and not upgrades.empty:
+                sections.append(f"\n## Recent Upgrades/Downgrades for {ticker.upper()}")
+                sections.append(upgrades.head(20).to_csv())
+        except Exception:
+            pass
+
+        if not sections:
+            return f"No analyst recommendation data found for symbol '{ticker}'"
+
+        header = f"# Analyst Recommendations for {ticker.upper()}\n"
+        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
+        return header + "\n".join(sections)
+
+    except Exception as e:
+        return f"Error retrieving analyst recommendations for {ticker}: {str(e)}"
+
+
+def get_live_quote(
+    ticker: Annotated[str, "ticker symbol of the company"],
+) -> str:
+    """Get a near-real-time quote snapshot (~15 min delayed) from yfinance.
+
+    Returns last price, day range, volume, previous close, and percent change.
+    Useful mid-trading-day when daily OHLCV bars only reflect the open.
+    """
+    try:
+        t = yf.Ticker(ticker.upper())
+        fi = t.fast_info
+
+        last = fi.get("lastPrice")
+        prev_close = fi.get("previousClose")
+        day_high = fi.get("dayHigh")
+        day_low = fi.get("dayLow")
+        last_volume = fi.get("lastVolume")
+        mkt_cap = fi.get("marketCap")
+
+        if last is None:
+            return f"No live quote available for '{ticker}'"
+
+        pct_change = ""
+        if prev_close and prev_close != 0:
+            change = ((last - prev_close) / prev_close) * 100
+            pct_change = f"Change from prev close: {change:+.2f}%\n"
+
+        header = f"# Live Quote Snapshot for {ticker.upper()}\n"
+        header += f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (delayed ~15 min)\n\n"
+
+        lines = [
+            f"Last Price: {last:.2f}" if last else None,
+            f"Previous Close: {prev_close:.2f}" if prev_close else None,
+            pct_change.strip() if pct_change else None,
+            f"Day Range: {day_low:.2f} - {day_high:.2f}" if day_low and day_high else None,
+            f"Volume: {last_volume:,.0f}" if last_volume else None,
+            f"Market Cap: {mkt_cap:,.0f}" if mkt_cap else None,
+        ]
+
+        return header + "\n".join(l for l in lines if l)
+
+    except Exception as e:
+        return f"Error retrieving live quote for {ticker}: {str(e)}"

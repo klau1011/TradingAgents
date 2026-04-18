@@ -23,11 +23,13 @@ from tradingagents.dataflows.config import set_config
 # Import the new abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
+    get_live_quote,
     get_indicators,
     get_fundamentals,
     get_balance_sheet,
     get_cashflow,
     get_income_statement,
+    get_analyst_recommendations,
     get_news,
     get_insider_transactions,
     get_global_news
@@ -160,6 +162,8 @@ class TradingAgentsGraph:
                 [
                     # Core stock data tools
                     get_stock_data,
+                    # Live quote snapshot
+                    get_live_quote,
                     # Technical indicators
                     get_indicators,
                 ]
@@ -185,6 +189,8 @@ class TradingAgentsGraph:
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
+                    get_insider_transactions,
+                    get_analyst_recommendations,
                 ]
             ),
         }

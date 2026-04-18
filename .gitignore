@@ -12,6 +12,7 @@ build/
 develop-eggs/
 dist/
 downloads/
+reports/
 eggs/
 .eggs/
 lib/
@@ -217,3 +218,15 @@ __marimo__/
 
 # Cache
 **/data_cache/
+
+# Project-specific: venv artifacts inside tradingagents source dir
+tradingagents/pyvenv.cfg
+tradingagents/Include/
+tradingagents/Lib/
+tradingagents/Scripts/
+
+# Dedicated virtual environment
+tradingagents_env/
+
+# Generated results
+results/

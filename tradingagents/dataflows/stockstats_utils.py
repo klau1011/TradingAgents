@@ -44,29 +44,43 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60  # 24 hours
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
-    Downloads 15 years of data up to today and caches per symbol. On
-    subsequent calls the cache is reused. Rows after curr_date are
-    filtered out so backtests never see future prices.
+    Downloads 5 years of data up to today and caches per symbol. On
+    subsequent calls the cache is reused if less than 24 hours old.
+    Rows after curr_date are filtered out so backtests never see future
+    prices.
     """
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
 
-    # Cache uses a fixed window (15y to today) so one file per symbol
     today_date = pd.Timestamp.today()
     start_date = today_date - pd.DateOffset(years=5)
     start_str = start_date.strftime("%Y-%m-%d")
-    end_str = today_date.strftime("%Y-%m-%d")
+    # yf.download 'end' is exclusive, so add 1 day to include today
+    end_str = (today_date + pd.DateOffset(days=1)).strftime("%Y-%m-%d")
 
     os.makedirs(config["data_cache_dir"], exist_ok=True)
     data_file = os.path.join(
         config["data_cache_dir"],
-        f"{symbol}-YFin-data-{start_str}-{end_str}.csv",
+        f"{symbol}-YFin-data.csv",
     )
 
+    use_cache = False
     if os.path.exists(data_file):
+        file_age = time.time() - os.path.getmtime(data_file)
+        if file_age <= _CACHE_MAX_AGE_SECONDS:
+            use_cache = True
+        else:
+            logger.info(
+                f"Cache for {symbol} is {file_age / 3600:.1f}h old, refreshing"
+            )
+
+    if use_cache:
         data = pd.read_csv(data_file, on_bad_lines="skip")
     else:
         data = yf_retry(lambda: yf.download(

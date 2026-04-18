@@ -2,7 +2,8 @@ from langchain_core.messages import HumanMessage, RemoveMessage
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import (
-    get_stock_data
+    get_stock_data,
+    get_live_quote
 )
 from tradingagents.agents.utils.technical_indicators_tools import (
     get_indicators
@@ -11,7 +12,8 @@ from tradingagents.agents.utils.fundamental_data_tools import (
     get_fundamentals,
     get_balance_sheet,
     get_cashflow,
-    get_income_statement
+    get_income_statement,
+    get_analyst_recommendations
 )
 from tradingagents.agents.utils.news_data_tools import (
     get_news,
@@ -35,12 +37,42 @@ def get_language_instruction() -> str:
 
 
 def build_instrument_context(ticker: str) -> str:
-    """Describe the exact instrument so agents preserve exchange-qualified tickers."""
-    return (
+    """Describe the exact instrument so agents preserve exchange-qualified tickers.
+    
+    Detects ETFs and adds context so analysts adjust their methodology accordingly.
+    """
+    import yfinance as yf
+
+    base = (
         f"The instrument to analyze is `{ticker}`. "
         "Use this exact ticker in every tool call, report, and recommendation, "
         "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`)."
     )
+
+    try:
+        info = yf.Ticker(ticker.upper()).info or {}
+        quote_type = info.get("quoteType", "").upper()
+    except Exception:
+        return base
+
+    if quote_type == "ETF":
+        etf_name = info.get("longName") or info.get("shortName") or ticker
+        category = info.get("category", "Unknown")
+        total_assets = info.get("totalAssets")
+        assets_str = f" Total assets: {total_assets:,.0f}." if total_assets else ""
+
+        etf_context = (
+            f"\n\nIMPORTANT: `{ticker}` is an ETF ({etf_name}), category: {category}.{assets_str} "
+            "Adjust your analysis for an ETF, not an individual company: "
+            "focus on sector/thematic exposure, holdings concentration, tracking error, "
+            "expense ratio, distribution yield, and NAV discount/premium. "
+            "Traditional single-company metrics (e.g. insider transactions, individual company "
+            "earnings, P/E ratio) may not apply or should be interpreted differently. "
+            "If fundamental data tools return empty results, that is expected for ETFs."
+        )
+        return base + etf_context
+
+    return base
 
 def create_msg_delete():
     def delete_messages(state):

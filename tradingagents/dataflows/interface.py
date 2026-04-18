@@ -1,4 +1,15 @@
+import logging
+
 from typing import Annotated
+
+logger = logging.getLogger(__name__)
+
+_DATA_UNAVAILABLE_PREFIX = (
+    "[DATA UNAVAILABLE] "
+)
+_DATA_UNAVAILABLE_SUFFIX = (
+    " Do not infer or estimate values for this data — skip it in your analysis."
+)
 
 # Import from vendor-specific modules
 from .y_finance import (
@@ -9,6 +20,8 @@ from .y_finance import (
     get_cashflow as get_yfinance_cashflow,
     get_income_statement as get_yfinance_income_statement,
     get_insider_transactions as get_yfinance_insider_transactions,
+    get_analyst_recommendations as get_yfinance_analyst_recommendations,
+    get_live_quote as get_yfinance_live_quote,
 )
 from .yfinance_news import get_news_yfinance, get_global_news_yfinance
 from .alpha_vantage import (
@@ -30,9 +43,10 @@ from .config import get_config
 # Tools organized by category
 TOOLS_CATEGORIES = {
     "core_stock_apis": {
-        "description": "OHLCV stock price data",
+        "description": "OHLCV stock price data and live quotes",
         "tools": [
-            "get_stock_data"
+            "get_stock_data",
+            "get_live_quote"
         ]
     },
     "technical_indicators": {
@@ -47,7 +61,8 @@ TOOLS_CATEGORIES = {
             "get_fundamentals",
             "get_balance_sheet",
             "get_cashflow",
-            "get_income_statement"
+            "get_income_statement",
+            "get_analyst_recommendations"
         ]
     },
     "news_data": {
@@ -107,6 +122,12 @@ VENDOR_METHODS = {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
         "yfinance": get_yfinance_insider_transactions,
     },
+    "get_analyst_recommendations": {
+        "yfinance": get_yfinance_analyst_recommendations,
+    },
+    "get_live_quote": {
+        "yfinance": get_yfinance_live_quote,
+    },
 }
 
 def get_category_for_method(method: str) -> str:
@@ -130,6 +151,17 @@ def get_vendor(category: str, method: str = None) -> str:
 
     # Fall back to category-level configuration
     return config.get("data_vendors", {}).get(category, "default")
+
+def _tag_if_error(result: str) -> str:
+    """Prefix error / empty tool responses so LLMs know to skip rather than hallucinate."""
+    if not isinstance(result, str):
+        return result
+    stripped = result.strip()
+    if not stripped or stripped.lower().startswith("error"):
+        logger.warning("Tool returned error/empty response: %s", stripped[:120])
+        return f"{_DATA_UNAVAILABLE_PREFIX}{stripped}{_DATA_UNAVAILABLE_SUFFIX}"
+    return result
+
 
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
@@ -155,7 +187,8 @@ def route_to_vendor(method: str, *args, **kwargs):
         impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
 
         try:
-            return impl_func(*args, **kwargs)
+            result = impl_func(*args, **kwargs)
+            return _tag_if_error(result)
         except AlphaVantageRateLimitError:
             continue  # Only rate limits trigger fallback
 

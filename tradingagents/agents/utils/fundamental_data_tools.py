@@ -75,3 +75,18 @@ def get_income_statement(
         str: A formatted report containing income statement data
     """
     return route_to_vendor("get_income_statement", ticker, freq, curr_date)
+
+
+@tool
+def get_analyst_recommendations(
+    ticker: Annotated[str, "ticker symbol"],
+) -> str:
+    """
+    Retrieve Wall Street analyst recommendations, price targets, and recent upgrades/downgrades.
+    Uses the configured fundamental_data vendor.
+    Args:
+        ticker (str): Ticker symbol of the company
+    Returns:
+        str: A formatted report containing analyst recommendations and price targets
+    """
+    return route_to_vendor("get_analyst_recommendations", ticker)

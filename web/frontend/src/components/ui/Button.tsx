@@ -12,12 +12,14 @@ const base =
   "focus:outline-none focus-visible:shadow-focus disabled:opacity-40 disabled:cursor-not-allowed";
 
 const variants: Record<Variant, string> = {
-  primary: "bg-dark text-white px-32p py-14p hover:opacity-85",
-  secondary: "bg-surface text-black px-34p py-14p hover:opacity-85",
+  primary: "bg-inverse text-inverse-fg px-32p py-14p hover:opacity-85",
+  secondary: "bg-surface text-fg px-34p py-14p hover:opacity-85",
   outlined:
-    "bg-transparent text-dark border-2 border-dark px-32p py-14p hover:opacity-85",
+    "bg-transparent text-fg border-2 border-fg px-32p py-14p hover:opacity-85",
+  // Ghost is for use on inverted hero sections (bg-inverse). Colors track
+  // the hero's foreground (inverse-fg) so it inverts cleanly with the theme.
   ghost:
-    "bg-white/10 text-surface border-2 border-surface px-32p py-14p hover:opacity-85",
+    "bg-inverse-fg/10 text-inverse-fg border-2 border-inverse-fg px-32p py-14p hover:opacity-85",
 };
 
 export function Button({

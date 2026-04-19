@@ -102,7 +102,7 @@ def get_report(folder: str) -> Optional[Dict[str, Any]]:
         if not complete.exists():
             continue
         sections: Dict[str, Dict[str, str]] = {}
-        for sub in ("1_analysts", "2_research", "3_trading", "4_risk", "5_portfolio"):
+        for sub in ("0_summary", "1_analysts", "2_research", "3_trading", "4_risk", "5_portfolio"):
             sub_dir = candidate / sub
             if not sub_dir.exists():
                 continue
@@ -113,9 +113,16 @@ def get_report(folder: str) -> Optional[Dict[str, Any]]:
             if files:
                 sections[sub] = files
         m = _FOLDER_RE.match(safe)
+        briefing_path = candidate / "0_summary" / "briefing.md"
+        briefing = (
+            briefing_path.read_text(encoding="utf-8", errors="replace")
+            if briefing_path.exists()
+            else None
+        )
         return {
             "folder": safe,
             "ticker": m.group("ticker") if m else safe,
+            "briefing": briefing,
             "complete_report": complete.read_text(encoding="utf-8", errors="replace"),
             "sections": sections,
             "decision": _peek_decision(candidate),

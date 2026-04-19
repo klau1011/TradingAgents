@@ -21,19 +21,19 @@ export function RunPage() {
 
   return (
     <div className="space-y-0">
-      {/* Dark header section: status + decision callout */}
-      <section className="bg-dark text-white px-32p py-80p">
+      {/* Inverted hero section: status + decision callout */}
+      <section className="bg-inverse text-inverse-fg px-32p py-80p">
         <div className="mx-auto max-w-7xl space-y-32p">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="space-y-3">
-              <p className="font-display text-nav text-slate-cool">
+              <p className="font-display text-nav text-inverse-fg/60">
                 Run {runId?.slice(0, 8)}
               </p>
               <h1 className="font-display text-display-hero font-medium">
                 {state.decision ? (
                   <DecisionBadge decision={state.decision} />
                 ) : (
-                  <span className="text-white">
+                  <span className="text-inverse-fg">
                     {state.status === "queued"
                       ? `Queued · position ${(state.queuePosition ?? 0) + 1}`
                       : state.status === "running"
@@ -52,7 +52,7 @@ export function RunPage() {
             {state.agentOrder.map((agent) => (
               <div
                 key={agent}
-                className="flex items-center justify-between rounded-card bg-white/5 px-4 py-3 border border-white/10"
+                className="flex items-center justify-between rounded-card bg-inverse-fg/5 px-4 py-3 border border-inverse-fg/10"
               >
                 <span className="font-display text-body-em">{agent}</span>
                 <StatusBadge status={state.agents[agent]} />
@@ -78,7 +78,7 @@ export function RunPage() {
         </div>
       </section>
 
-      {/* Light section: streaming report + activity feed */}
+      {/* Alternating elevated surface: streaming report + activity feed */}
       <section className="bg-surface px-32p py-80p">
         <div className="mx-auto max-w-7xl grid grid-cols-1 lg:grid-cols-3 gap-32p">
           <Card className="lg:col-span-2 max-h-[80vh] overflow-y-auto">
@@ -94,14 +94,14 @@ export function RunPage() {
                 </ReactMarkdown>
               </article>
             ) : (
-              <p className="text-slate-mid text-body">
+              <p className="text-muted text-body">
                 Reports will stream in as each agent finishes.
               </p>
             )}
 
             {reportEntries.length > 1 && (
               <details className="mt-32p">
-                <summary className="font-display text-body-em cursor-pointer text-slate-mid">
+                <summary className="font-display text-body-em cursor-pointer text-muted">
                   Other sections ({reportEntries.length - 1})
                 </summary>
                 <div className="mt-4 space-y-32p">
@@ -130,10 +130,10 @@ export function RunPage() {
       </section>
 
       {state.status === "done" && state.reportPath && (
-        <section className="bg-white px-32p py-80p">
+        <section className="bg-canvas px-32p py-80p">
           <div className="mx-auto max-w-7xl flex flex-wrap items-center justify-between gap-4">
-            <p className="font-display text-feature text-slate-mid">
-              Report saved to <code className="text-dark">{state.reportPath}</code>
+            <p className="font-display text-feature text-muted">
+              Report saved to <code className="text-fg">{state.reportPath}</code>
             </p>
             <Link to="/history">
               <Button variant="primary">Open in history</Button>
@@ -174,22 +174,22 @@ function ActivityFeed({
       <h2 className="font-display text-card font-medium mb-4">Activity</h2>
       <div ref={ref} className="flex-1 overflow-y-auto space-y-3 pr-2">
         {items.map((it, idx) => (
-          <div key={idx} className="border-b border-slate-tone/60 pb-2 last:border-0">
+          <div key={idx} className="border-b border-edge/60 pb-2 last:border-0">
             <div className="flex items-center gap-2 mb-1">
-              <span className="font-display text-xs text-slate-cool">
+              <span className="font-display text-xs text-subtle">
                 {it.ts.slice(11, 19)}
               </span>
-              <span className="font-display text-xs uppercase tracking-wider text-slate-mid">
+              <span className="font-display text-xs uppercase tracking-wider text-muted">
                 {it.kind}
               </span>
             </div>
-            <p className="text-body-em text-dark break-words">
+            <p className="text-body-em text-fg break-words">
               {it.text.length > 280 ? it.text.slice(0, 280) + "…" : it.text}
             </p>
           </div>
         ))}
         {items.length === 0 && (
-          <p className="text-slate-mid text-body">Waiting for events…</p>
+          <p className="text-muted text-body">Waiting for events…</p>
         )}
       </div>
     </Card>

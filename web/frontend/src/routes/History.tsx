@@ -15,10 +15,10 @@ export function HistoryPage() {
   return (
     <div className="mx-auto max-w-7xl px-32p py-80p space-y-80p">
       <header>
-        <h1 className="font-display text-display-hero font-medium text-dark">
+        <h1 className="font-display text-display-hero font-medium text-fg">
           History.
         </h1>
-        <p className="text-body-lg text-slate-mid mt-3">
+        <p className="text-body-lg text-muted mt-3">
           Past analyses and currently active runs.
         </p>
       </header>
@@ -29,7 +29,7 @@ export function HistoryPage() {
           {runs.data && runs.data.length > 0 ? (
             <table className="w-full text-left">
               <thead>
-                <tr className="text-slate-mid font-display text-body-em uppercase tracking-wider text-xs">
+                <tr className="text-muted font-display text-body-em uppercase tracking-wider text-xs">
                   <th className="pb-4">Ticker</th>
                   <th className="pb-4">Date</th>
                   <th className="pb-4">Status</th>
@@ -40,7 +40,7 @@ export function HistoryPage() {
               </thead>
               <tbody>
                 {runs.data.map((r) => (
-                  <tr key={r.run_id} className="border-t border-slate-tone">
+                  <tr key={r.run_id} className="border-t border-edge">
                     <td className="py-3 font-display text-feature">
                       {r.ticker}
                     </td>
@@ -52,10 +52,10 @@ export function HistoryPage() {
                       {r.decision ? (
                         <DecisionBadge decision={r.decision} />
                       ) : (
-                        <span className="text-slate-cool">—</span>
+                        <span className="text-subtle">—</span>
                       )}
                     </td>
-                    <td className="py-3 text-slate-mid text-body">
+                    <td className="py-3 text-muted text-body">
                       {r.started_at?.slice(11, 19) ?? "—"}
                     </td>
                     <td className="py-3 text-right">
@@ -71,7 +71,7 @@ export function HistoryPage() {
               </tbody>
             </table>
           ) : (
-            <p className="text-slate-mid text-body">No active runs.</p>
+            <p className="text-muted text-body">No active runs.</p>
           )}
         </Card>
       </section>
@@ -80,11 +80,11 @@ export function HistoryPage() {
         <h2 className="font-display text-section font-medium">Saved reports</h2>
         <Card>
           {reports.isLoading ? (
-            <p className="text-slate-mid text-body">Loading…</p>
+            <p className="text-muted text-body">Loading…</p>
           ) : reports.data && reports.data.length > 0 ? (
             <table className="w-full text-left">
               <thead>
-                <tr className="text-slate-mid font-display text-body-em uppercase tracking-wider text-xs">
+                <tr className="text-muted font-display text-body-em uppercase tracking-wider text-xs">
                   <th className="pb-4">Ticker</th>
                   <th className="pb-4">When</th>
                   <th className="pb-4">Decision</th>
@@ -93,18 +93,18 @@ export function HistoryPage() {
               </thead>
               <tbody>
                 {reports.data.map((r) => (
-                  <tr key={r.folder} className="border-t border-slate-tone">
+                  <tr key={r.folder} className="border-t border-edge">
                     <td className="py-3 font-display text-feature">
                       {r.ticker}
                     </td>
-                    <td className="py-3 text-body text-slate-mid">
+                    <td className="py-3 text-body text-muted">
                       {new Date(r.timestamp).toLocaleString()}
                     </td>
                     <td className="py-3">
                       {r.decision ? (
                         <DecisionBadge decision={r.decision} />
                       ) : (
-                        <span className="text-slate-cool">—</span>
+                        <span className="text-subtle">—</span>
                       )}
                     </td>
                     <td className="py-3 text-right">
@@ -120,7 +120,7 @@ export function HistoryPage() {
               </tbody>
             </table>
           ) : (
-            <p className="text-slate-mid text-body">No saved reports yet.</p>
+            <p className="text-muted text-body">No saved reports yet.</p>
           )}
         </Card>
       </section>

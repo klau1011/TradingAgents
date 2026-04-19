@@ -67,6 +67,7 @@ FIXED_AGENTS: Dict[str, List[str]] = {
         "Conservative Analyst",
     ],
     "Portfolio Management": ["Portfolio Manager"],
+    "Investor Briefing": ["Investor Briefing"],
 }
 
 # section -> (analyst_key controlling the section, finalizing agent name)
@@ -78,6 +79,7 @@ REPORT_SECTIONS: Dict[str, tuple] = {
     "investment_plan": (None, "Research Manager"),
     "trader_investment_plan": (None, "Trader"),
     "final_trade_decision": (None, "Portfolio Manager"),
+    "investor_briefing": (None, "Investor Briefing"),
 }
 
 
@@ -394,6 +396,12 @@ class AnalysisRunner:
                     self._set_agent_status("Conservative Analyst", "completed")
                     self._set_agent_status("Neutral Analyst", "completed")
                     self._set_agent_status("Portfolio Manager", "completed")
+                    self._set_agent_status("Investor Briefing", "in_progress")
+
+        # Investor briefing (plain-language summary, runs last)
+        if chunk.get("investor_briefing"):
+            self._set_report_section("investor_briefing", chunk["investor_briefing"])
+            self._set_agent_status("Investor Briefing", "completed")
 
     def _update_analyst_statuses(self, chunk: Dict[str, Any]) -> None:
         found_active = False
@@ -527,6 +535,14 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
     """
     save_path.mkdir(parents=True, exist_ok=True)
     sections: List[str] = []
+
+    # 0. Investor briefing (plain-language summary, shown first)
+    briefing = final_state.get("investor_briefing")
+    if briefing:
+        summary_dir = save_path / "0_summary"
+        summary_dir.mkdir(exist_ok=True)
+        (summary_dir / "briefing.md").write_text(briefing, encoding="utf-8")
+        sections.append(f"## 0. Investor Briefing\n\n{briefing}")
 
     # 1. Analysts
     analysts_dir = save_path / "1_analysts"

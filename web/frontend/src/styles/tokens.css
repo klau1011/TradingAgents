@@ -21,10 +21,48 @@
 }
 */
 
+/* ------------------------------------------------------------------ */
+/* Theme tokens                                                       */
+/* Semantic CSS variables consumed by Tailwind aliases (canvas, fg,   */
+/* muted, subtle, edge, surface, inverse, inverse-fg) and by the      */
+/* markdown body. Swap via [data-theme="dark"] on <html>.             */
+/* ------------------------------------------------------------------ */
 :root {
+  color-scheme: light;
+  --color-bg: #ffffff;
+  --color-fg: #191c1f;
+  --color-muted: #505a63;
+  --color-subtle: #8d969e;
+  --color-border: #c9c9cd;
+  --color-surface: #f4f4f4;
+  --color-inverse: #191c1f;
+  --color-inverse-fg: #ffffff;
+  --color-code-bg: #f4f4f4;
+  --color-pre-bg: #191c1f;
+  --color-pre-fg: #f4f4f4;
+  --color-blockquote-border: #c9c9cd;
+  --color-blockquote-fg: #505a63;
+
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #0e1012;
+  --color-fg: #f4f4f4;
+  --color-muted: #c9c9cd;
+  --color-subtle: #8d969e;
+  --color-border: #2a2e33;
+  --color-surface: #191c1f;
+  --color-inverse: #f4f4f4;
+  --color-inverse-fg: #191c1f;
+  --color-code-bg: #191c1f;
+  --color-pre-bg: #000000;
+  --color-pre-fg: #f4f4f4;
+  --color-blockquote-border: #2a2e33;
+  --color-blockquote-fg: #c9c9cd;
 }
 
 html,
@@ -33,13 +71,19 @@ body,
   min-height: 100%;
 }
 
+body {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
 /* Markdown body overrides — keep DESIGN.md typography on report viewer */
 .md-body {
   font-family: "Inter", system-ui, sans-serif;
   font-size: 1rem;
   line-height: 1.5;
   letter-spacing: 0.16px;
-  color: #191c1f;
+  color: var(--color-fg);
 }
 .md-body h1,
 .md-body h2,
@@ -50,6 +94,7 @@ body,
   letter-spacing: -0.32px;
   margin-top: 2rem;
   margin-bottom: 1rem;
+  color: var(--color-fg);
 }
 .md-body h1 {
   font-size: 2.5rem;
@@ -75,14 +120,14 @@ body,
 }
 .md-body code {
   font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
-  background: #f4f4f4;
+  background: var(--color-code-bg);
   padding: 0.1em 0.35em;
   border-radius: 6px;
   font-size: 0.9em;
 }
 .md-body pre {
-  background: #191c1f;
-  color: #f4f4f4;
+  background: var(--color-pre-bg);
+  color: var(--color-pre-fg);
   padding: 16px 20px;
   border-radius: 12px;
   overflow-x: auto;
@@ -93,9 +138,9 @@ body,
   color: inherit;
 }
 .md-body blockquote {
-  border-left: 4px solid #c9c9cd;
+  border-left: 4px solid var(--color-blockquote-border);
   padding-left: 1rem;
-  color: #505a63;
+  color: var(--color-blockquote-fg);
   margin: 1rem 0;
 }
 .md-body table {
@@ -105,11 +150,11 @@ body,
 }
 .md-body th,
 .md-body td {
-  border: 1px solid #c9c9cd;
+  border: 1px solid var(--color-border);
   padding: 0.5rem 0.75rem;
   text-align: left;
 }
 .md-body th {
-  background: #f4f4f4;
+  background: var(--color-surface);
   font-weight: 600;
 }

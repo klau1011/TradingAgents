@@ -9,7 +9,9 @@ export function Card({
   className?: string;
   dark?: boolean;
 }) {
-  const surface = dark ? "bg-dark text-white" : "bg-white text-dark";
+  const surface = dark
+    ? "bg-inverse text-inverse-fg"
+    : "bg-canvas text-fg";
   return (
     <section className={`rounded-card ${surface} p-32p ${className}`}>
       {children}

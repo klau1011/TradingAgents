@@ -6,9 +6,19 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Primary surfaces
+        // Theme-aware semantic tokens (resolve via CSS vars in tokens.css).
+        // Use these for everything that should flip with light/dark mode.
+        canvas: "var(--color-bg)",
+        fg: "var(--color-fg)",
+        muted: "var(--color-muted)",
+        subtle: "var(--color-subtle)",
+        edge: "var(--color-border)",
+        surface: "var(--color-surface)",
+        inverse: "var(--color-inverse)",
+        "inverse-fg": "var(--color-inverse-fg)",
+        // Brand fixed tokens (do NOT flip — kept for backward compatibility
+        // and for cases where the literal Revolut Dark is intentional).
         dark: "#191c1f",
-        surface: "#f4f4f4",
         // RUI semantic tokens
         rui: {
           blue: "#494fdf",

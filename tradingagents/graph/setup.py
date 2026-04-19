@@ -103,6 +103,7 @@ class GraphSetup:
         portfolio_manager_node = create_portfolio_manager(
             self.deep_thinking_llm, self.portfolio_manager_memory
         )
+        investor_briefing_node = create_investor_briefing(self.quick_thinking_llm)
 
         # Create workflow
         workflow = StateGraph(AgentState)
@@ -124,6 +125,7 @@ class GraphSetup:
         workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
         workflow.add_node("Portfolio Manager", portfolio_manager_node)
+        workflow.add_node("Investor Briefing", investor_briefing_node)
 
         # Define edges
         # Start with the first analyst
@@ -195,7 +197,8 @@ class GraphSetup:
             },
         )
 
-        workflow.add_edge("Portfolio Manager", END)
+        workflow.add_edge("Portfolio Manager", "Investor Briefing")
+        workflow.add_edge("Investor Briefing", END)
 
         # Compile and return
         return workflow.compile()

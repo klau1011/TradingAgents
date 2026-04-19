@@ -6,8 +6,26 @@
     <title>TradingAgents Dashboard</title>
     <link rel="preconnect" href="https://rsms.me/" />
     <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+    <script>
+      // Pre-mount theme init: prevents FOUC on hard reload.
+      (function () {
+        try {
+          var stored = localStorage.getItem("ta-theme");
+          var theme =
+            stored === "light" || stored === "dark"
+              ? stored
+              : window.matchMedia &&
+                  window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light";
+          document.documentElement.dataset.theme = theme;
+        } catch (e) {
+          /* localStorage unavailable — fall back to light */
+        }
+      })();
+    </script>
   </head>
-  <body class="bg-white text-dark font-body">
+  <body class="bg-canvas text-fg font-body">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

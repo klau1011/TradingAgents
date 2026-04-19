@@ -91,6 +91,7 @@ export interface ReportSummary {
 export interface ReportDetail {
   folder: string;
   ticker: string;
+  briefing: string | null;
   complete_report: string;
   sections: Record<string, Record<string, string>>;
   decision: string | null;

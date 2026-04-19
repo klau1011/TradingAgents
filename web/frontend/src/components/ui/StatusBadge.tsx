@@ -1,7 +1,7 @@
 import type { AgentStatus, RunStatus } from "../../types";
 
 const agentColor: Record<AgentStatus, string> = {
-  pending: "bg-slate-cool/20 text-slate-mid",
+  pending: "bg-subtle/20 text-muted",
   in_progress: "bg-rui-blue/15 text-rui-blue",
   completed: "bg-rui-teal/15 text-rui-teal",
   error: "bg-rui-danger/15 text-rui-danger",
@@ -45,7 +45,7 @@ function Dot({ status }: { status: string }) {
           ? "bg-rui-danger"
           : status === "queued"
             ? "bg-rui-yellow"
-            : "bg-slate-cool";
+            : "bg-subtle";
   const animate =
     status === "in_progress" || status === "running" ? "animate-pulse" : "";
   return <span className={`h-2 w-2 rounded-pill ${color} ${animate}`} />;
@@ -60,7 +60,7 @@ export function DecisionBadge({ decision }: { decision: string | null }) {
     ? "bg-rui-teal text-white"
     : isSell
       ? "bg-rui-danger text-white"
-      : "bg-slate-cool text-white";
+      : "bg-subtle text-white";
   return (
     <span
       className={`inline-flex items-center rounded-pill px-32p py-14p font-display text-nav font-medium ${cls}`}

@@ -48,6 +48,7 @@ class MessageBuffer:
         "Trading Team": ["Trader"],
         "Risk Management": ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"],
         "Portfolio Management": ["Portfolio Manager"],
+        "Investor Briefing": ["Investor Briefing"],
     }
 
     # Analyst name mapping
@@ -69,6 +70,7 @@ class MessageBuffer:
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
         "final_trade_decision": (None, "Portfolio Manager"),
+        "investor_briefing": (None, "Investor Briefing"),
     }
 
     def __init__(self, max_length=100):
@@ -177,6 +179,7 @@ class MessageBuffer:
                 "investment_plan": "Research Team Decision",
                 "trader_investment_plan": "Trading Team Plan",
                 "final_trade_decision": "Portfolio Management Decision",
+                "investor_briefing": "Investor Briefing",
             }
             self.current_report = (
                 f"### {section_titles[latest_section]}\n{latest_content}"
@@ -187,6 +190,11 @@ class MessageBuffer:
 
     def _update_final_report(self):
         report_parts = []
+
+        # Investor Briefing (plain-language summary, shown first)
+        if self.report_sections.get("investor_briefing"):
+            report_parts.append("## Investor Briefing")
+            report_parts.append(f"{self.report_sections['investor_briefing']}")
 
         # Analyst Team Reports - use .get() to handle missing sections
         analyst_sections = ["market_report", "sentiment_report", "news_report", "fundamentals_report"]

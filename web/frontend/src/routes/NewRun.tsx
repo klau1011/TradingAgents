@@ -26,6 +26,10 @@ export function NewRunPage() {
   const [deep, setDeep] = useState("gpt-5.4");
   const [depth, setDepth] = useState(1);
   const [language, setLanguage] = useState("English");
+  // Provider-specific thinking depth. Mirrors the CLI's Step 8.
+  const [openaiEffort, setOpenaiEffort] = useState("medium");
+  const [anthropicEffort, setAnthropicEffort] = useState("high");
+  const [googleThinking, setGoogleThinking] = useState("high");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -47,6 +51,12 @@ export function NewRunPage() {
         shallow_thinker: shallow,
         deep_thinker: deep,
         output_language: language,
+        openai_reasoning_effort:
+          provider === "openai" ? openaiEffort : null,
+        anthropic_effort:
+          provider === "anthropic" ? anthropicEffort : null,
+        google_thinking_level:
+          provider === "google" ? googleThinking : null,
       });
       navigate(`/runs/${run.run_id}`);
     } catch (e) {
@@ -63,15 +73,15 @@ export function NewRunPage() {
   }
 
   if (isLoading || !opts)
-    return <div className="p-32p text-body text-slate-mid">Loading…</div>;
+    return <div className="p-32p text-body text-muted">Loading…</div>;
 
   return (
     <div className="mx-auto max-w-5xl px-32p py-80p space-y-80p">
       <header className="space-y-6">
-        <h1 className="font-display text-display-hero font-medium text-dark">
+        <h1 className="font-display text-display-hero font-medium text-fg">
           Run an analysis.
         </h1>
-        <p className="text-body-lg text-slate-mid max-w-2xl">
+        <p className="text-body-lg text-muted max-w-2xl">
           Spin up a multi-agent debate over your ticker. Up to three runs
           execute concurrently — extras are queued.
         </p>
@@ -112,8 +122,8 @@ export function NewRunPage() {
                     onClick={() => toggleAnalyst(a.key)}
                     className={`rounded-pill px-32p py-3 font-display text-body-em border-2 transition-opacity ${
                       on
-                        ? "bg-dark text-white border-dark"
-                        : "bg-white text-dark border-slate-tone hover:opacity-85"
+                        ? "bg-inverse text-inverse-fg border-inverse"
+                        : "bg-canvas text-fg border-edge hover:opacity-85"
                     }`}
                   >
                     {a.label}
@@ -210,6 +220,45 @@ export function NewRunPage() {
             </Field>
           </div>
 
+          {provider === "openai" && (
+            <Field label="Reasoning effort">
+              <select
+                value={openaiEffort}
+                onChange={(e) => setOpenaiEffort(e.target.value)}
+                className={inputCls}
+              >
+                <option value="low">Low (faster)</option>
+                <option value="medium">Medium (default)</option>
+                <option value="high">High (more thorough)</option>
+              </select>
+            </Field>
+          )}
+          {provider === "anthropic" && (
+            <Field label="Effort level">
+              <select
+                value={anthropicEffort}
+                onChange={(e) => setAnthropicEffort(e.target.value)}
+                className={inputCls}
+              >
+                <option value="low">Low (faster, cheaper)</option>
+                <option value="medium">Medium (balanced)</option>
+                <option value="high">High (recommended)</option>
+              </select>
+            </Field>
+          )}
+          {provider === "google" && (
+            <Field label="Thinking mode">
+              <select
+                value={googleThinking}
+                onChange={(e) => setGoogleThinking(e.target.value)}
+                className={inputCls}
+              >
+                <option value="high">Enable thinking (recommended)</option>
+                <option value="minimal">Minimal / disable thinking</option>
+              </select>
+            </Field>
+          )}
+
           {err && <p className="text-rui-danger text-body">{err}</p>}
 
           <div className="flex flex-wrap items-center gap-4">
@@ -231,8 +280,8 @@ export function NewRunPage() {
 }
 
 const inputCls =
-  "w-full bg-white text-dark text-body border-2 border-slate-tone rounded-sm px-4 py-3 " +
-  "focus:outline-none focus:border-dark transition-colors";
+  "w-full bg-canvas text-fg text-body border-2 border-edge rounded-sm px-4 py-3 " +
+  "focus:outline-none focus:border-fg transition-colors";
 
 function Field({
   label,
@@ -243,7 +292,7 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="block font-display text-body-em font-medium text-slate-mid mb-2 uppercase tracking-wider text-xs">
+      <span className="block font-display text-body-em font-medium text-muted mb-2 uppercase tracking-wider text-xs">
         {label}
       </span>
       {children}

@@ -44,14 +44,14 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60  # 24 hours
+_CACHE_MAX_AGE_SECONDS = 60 * 60 * 0.1  # 6 minutes
 
 
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
     Downloads 5 years of data up to today and caches per symbol. On
-    subsequent calls the cache is reused if less than 24 hours old.
+    subsequent calls the cache is reused if less than 6 minutes old.
     Rows after curr_date are filtered out so backtests never see future
     prices.
     """

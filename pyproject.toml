@@ -42,14 +42,23 @@ bedrock = [
     "langchain-aws>=1.7.9",
 ]
 
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.0",
+    "python-dotenv>=1.0.1",
+]
+
 [project.scripts]
 tradingagents = "cli.main:app"
+tradingagents-web = "web.backend.launcher:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "tradingagents.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "web*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]

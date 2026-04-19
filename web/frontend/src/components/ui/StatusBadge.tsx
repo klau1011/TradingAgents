@@ -1,0 +1,71 @@
+import type { AgentStatus, RunStatus } from "../../types";
+
+const agentColor: Record<AgentStatus, string> = {
+  pending: "bg-slate-cool/20 text-slate-mid",
+  in_progress: "bg-rui-blue/15 text-rui-blue",
+  completed: "bg-rui-teal/15 text-rui-teal",
+  error: "bg-rui-danger/15 text-rui-danger",
+};
+
+const runColor: Record<RunStatus, string> = {
+  queued: "bg-rui-yellow/15 text-rui-yellow",
+  running: "bg-rui-blue/15 text-rui-blue",
+  done: "bg-rui-teal/15 text-rui-teal",
+  error: "bg-rui-danger/15 text-rui-danger",
+};
+
+export function StatusBadge({
+  status,
+  kind = "agent",
+  label,
+}: {
+  status: string;
+  kind?: "agent" | "run";
+  label?: string;
+}) {
+  const map = kind === "run" ? runColor : agentColor;
+  const cls = (map as Record<string, string>)[status] ?? agentColor.pending;
+  return (
+    <span
+      className={`inline-flex items-center gap-2 rounded-pill px-3 py-1 text-body-em font-display ${cls}`}
+    >
+      <Dot status={status} />
+      {label ?? status.replace("_", " ")}
+    </span>
+  );
+}
+
+function Dot({ status }: { status: string }) {
+  const color =
+    status === "in_progress" || status === "running"
+      ? "bg-rui-blue"
+      : status === "completed" || status === "done"
+        ? "bg-rui-teal"
+        : status === "error"
+          ? "bg-rui-danger"
+          : status === "queued"
+            ? "bg-rui-yellow"
+            : "bg-slate-cool";
+  const animate =
+    status === "in_progress" || status === "running" ? "animate-pulse" : "";
+  return <span className={`h-2 w-2 rounded-pill ${color} ${animate}`} />;
+}
+
+export function DecisionBadge({ decision }: { decision: string | null }) {
+  if (!decision) return null;
+  const upper = decision.toUpperCase();
+  const isBuy = /BUY|OVERWEIGHT/.test(upper);
+  const isSell = /SELL|UNDERWEIGHT/.test(upper);
+  const cls = isBuy
+    ? "bg-rui-teal text-white"
+    : isSell
+      ? "bg-rui-danger text-white"
+      : "bg-slate-cool text-white";
+  return (
+    <span
+      className={`inline-flex items-center rounded-pill px-32p py-14p font-display text-nav font-medium ${cls}`}
+    >
+      {upper}
+    </span>
+  );
+}

@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Aeonik Pro is a paid font; fall back to Inter cleanly. To enable it,
+   drop the Aeonik Pro woff2 files into /public/fonts/ and uncomment below.
+
+@font-face {
+  font-family: "Aeonik Pro";
+  src: url("/fonts/AeonikPro-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Aeonik Pro";
+  src: url("/fonts/AeonikPro-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+*/
+
+:root {
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+/* Markdown body overrides — keep DESIGN.md typography on report viewer */
+.md-body {
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+  letter-spacing: 0.16px;
+  color: #191c1f;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  font-family: "Aeonik Pro", "Inter", system-ui, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.32px;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+}
+.md-body h1 {
+  font-size: 2.5rem;
+  letter-spacing: -0.4px;
+}
+.md-body h2 {
+  font-size: 2rem;
+}
+.md-body h3 {
+  font-size: 1.5rem;
+  letter-spacing: 0;
+}
+.md-body p {
+  margin: 0.75rem 0;
+}
+.md-body ul,
+.md-body ol {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+}
+.md-body li {
+  margin: 0.25rem 0;
+}
+.md-body code {
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  background: #f4f4f4;
+  padding: 0.1em 0.35em;
+  border-radius: 6px;
+  font-size: 0.9em;
+}
+.md-body pre {
+  background: #191c1f;
+  color: #f4f4f4;
+  padding: 16px 20px;
+  border-radius: 12px;
+  overflow-x: auto;
+}
+.md-body pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.md-body blockquote {
+  border-left: 4px solid #c9c9cd;
+  padding-left: 1rem;
+  color: #505a63;
+  margin: 1rem 0;
+}
+.md-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid #c9c9cd;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.md-body th {
+  background: #f4f4f4;
+  font-weight: 600;
+}

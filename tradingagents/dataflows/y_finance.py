@@ -6,6 +6,79 @@ import yfinance as yf
 import os
 from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
 
+_VOLUME_WINDOW = 20
+_INDICATOR_ALIASES = {
+    "relative_volume": "rvol",
+    "rel_volume": "rvol",
+    "volume_z_score": "volume_zscore",
+    "vol_zscore": "volume_zscore",
+    "volume_slope": "volume_trend_slope",
+    "vol_slope": "volume_trend_slope",
+}
+_CUSTOM_VOLUME_INDICATORS = {
+    "rvol",
+    "volume_zscore",
+    "volume_trend_slope",
+}
+
+
+def _normalize_indicator_name(indicator: str) -> str:
+    """Normalize aliases so users can request indicators with common variants."""
+    normalized = str(indicator).strip().lower()
+    return _INDICATOR_ALIASES.get(normalized, normalized)
+
+
+def _compute_rvol(volume: pd.Series, window: int = _VOLUME_WINDOW) -> pd.Series:
+    rolling_mean = volume.rolling(window=window, min_periods=window).mean()
+    return volume / rolling_mean.replace(0, pd.NA)
+
+
+def _compute_volume_zscore(volume: pd.Series, window: int = _VOLUME_WINDOW) -> pd.Series:
+    rolling_mean = volume.rolling(window=window, min_periods=window).mean()
+    rolling_std = volume.rolling(window=window, min_periods=window).std()
+    return (volume - rolling_mean) / rolling_std.replace(0, pd.NA)
+
+
+def _compute_volume_trend_slope(volume: pd.Series, window: int = _VOLUME_WINDOW) -> pd.Series:
+    n = window
+    sum_x = n * (n - 1) / 2
+    sum_x2 = (n - 1) * n * (2 * n - 1) / 6
+    denominator = n * sum_x2 - (sum_x ** 2)
+
+    def slope_ratio(values) -> float:
+        if len(values) != n:
+            return float("nan")
+        sum_y = float(sum(values))
+        mean_y = sum_y / n
+        if mean_y == 0:
+            return float("nan")
+
+        sum_xy = 0.0
+        for i, value in enumerate(values):
+            sum_xy += i * float(value)
+
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        return slope / mean_y
+
+    return volume.rolling(window=window, min_periods=window).apply(
+        slope_ratio,
+        raw=True,
+    )
+
+
+def _compute_custom_volume_indicator(data: pd.DataFrame, indicator: str) -> pd.Series:
+    """Compute non-stockstats volume indicators from OHLCV data."""
+    volume = pd.to_numeric(data["Volume"], errors="coerce")
+
+    if indicator == "rvol":
+        return _compute_rvol(volume)
+    if indicator == "volume_zscore":
+        return _compute_volume_zscore(volume)
+    if indicator == "volume_trend_slope":
+        return _compute_volume_trend_slope(volume)
+
+    raise ValueError(f"Unsupported custom indicator: {indicator}")
+
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the company"],
     start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
@@ -59,6 +132,8 @@ def get_stock_stats_indicators_window(
     ],
     look_back_days: Annotated[int, "how many days to look back"],
 ) -> str:
+
+    indicator = _normalize_indicator_name(indicator)
 
     best_ind_params = {
         # Moving Averages
@@ -131,6 +206,21 @@ def get_stock_stats_indicators_window(
             "Usage: Identify overbought (>80) or oversold (<20) conditions and confirm the strength of trends or reversals. "
             "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
         ),
+        "rvol": (
+            "RVOL (Relative Volume): Current bar's volume divided by the trailing 20-bar simple average volume (window inclusive of the current bar). "
+            "Usage: Identify unusual participation and confirm breakout/breakdown conviction. "
+            "Tips: Values >1 imply above-normal activity (e.g. 1.5 = 50% heavier than typical); pair with price structure to avoid false signals."
+        ),
+        "volume_zscore": (
+            "Volume Z-Score: (current volume - 20-bar mean) / 20-bar sample standard deviation, i.e. how many standard deviations the latest volume sits from its trailing 20-bar mean. "
+            "Usage: Quantify whether volume is statistically extreme versus recent behavior. "
+            "Tips: |z| > 2 typically flags an outlier session; near-zero suggests normal conditions."
+        ),
+        "volume_trend_slope": (
+            "Volume Trend Slope: OLS linear-regression slope of volume against bar index over the last 20 bars, divided by the 20-bar mean volume (i.e. an approximate per-bar fractional growth rate of volume). "
+            "Usage: Detect whether participation is accelerating or fading over time. "
+            "Tips: Positive values mean rising engagement, negative values mean weakening interest; magnitude is comparable across tickers because it is mean-normalized."
+        ),
     }
 
     if indicator not in best_ind_params:
@@ -176,6 +266,8 @@ def get_stock_stats_indicators_window(
             indicator_value = get_stockstats_indicator(
                 symbol, indicator, curr_date_dt.strftime("%Y-%m-%d")
             )
+            if not str(indicator_value).strip():
+                indicator_value = f"N/A: Error retrieving {indicator}"
             ind_string += f"{curr_date_dt.strftime('%Y-%m-%d')}: {indicator_value}\n"
             curr_date_dt = curr_date_dt - relativedelta(days=1)
 
@@ -201,12 +293,27 @@ def _get_stock_stats_bulk(
     """
     from stockstats import wrap
 
+    indicator = _normalize_indicator_name(indicator)
+
     data = load_ohlcv(symbol, curr_date)
-    df = wrap(data)
-    df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
-    
-    # Calculate the indicator for all rows at once
-    df[indicator]  # This triggers stockstats to calculate the indicator
+    data = data.copy()
+    data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
+    data = data.dropna(subset=["Date"]).sort_values("Date")
+
+    if indicator in _CUSTOM_VOLUME_INDICATORS:
+        metric_values = _compute_custom_volume_indicator(data, indicator)
+        df = pd.DataFrame(
+            {
+                "Date": data["Date"].dt.strftime("%Y-%m-%d"),
+                indicator: metric_values,
+            }
+        )
+    else:
+        df = wrap(data)
+        df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
+
+        # Calculate the indicator for all rows at once
+        df[indicator]  # This triggers stockstats to calculate the indicator
     
     # Create a dictionary mapping date strings to indicator values
     result_dict = {}
@@ -215,7 +322,7 @@ def _get_stock_stats_bulk(
         indicator_value = row[indicator]
         
         # Handle NaN/None values
-        if pd.isna(indicator_value):
+        if pd.isna(indicator_value) or indicator_value in (float("inf"), float("-inf")):
             result_dict[date_str] = "N/A"
         else:
             result_dict[date_str] = str(indicator_value)
@@ -231,10 +338,16 @@ def get_stockstats_indicator(
     ],
 ) -> str:
 
+    indicator = _normalize_indicator_name(indicator)
+
     curr_date_dt = datetime.strptime(curr_date, "%Y-%m-%d")
     curr_date = curr_date_dt.strftime("%Y-%m-%d")
 
     try:
+        if indicator in _CUSTOM_VOLUME_INDICATORS:
+            indicator_values = _get_stock_stats_bulk(symbol, indicator, curr_date)
+            return indicator_values.get(curr_date, "N/A: Not a trading day (weekend or holiday)")
+
         indicator_value = StockstatsUtils.get_stock_stats(
             symbol,
             indicator,
@@ -244,7 +357,7 @@ def get_stockstats_indicator(
         print(
             f"Error getting stockstats indicator data for indicator {indicator} on {curr_date}: {e}"
         )
-        return ""
+        return f"N/A: Error retrieving {indicator}"
 
     return str(indicator_value)
 

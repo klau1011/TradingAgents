@@ -168,6 +168,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
     primary_vendors = [v.strip() for v in vendor_config.split(',')]
+    last_error = None
 
     if method not in VENDOR_METHODS:
         raise ValueError(f"Method '{method}' not supported")
@@ -189,7 +190,23 @@ def route_to_vendor(method: str, *args, **kwargs):
         try:
             result = impl_func(*args, **kwargs)
             return _tag_if_error(result)
-        except AlphaVantageRateLimitError:
+        except AlphaVantageRateLimitError as e:
+            last_error = e
             continue  # Only rate limits trigger fallback
+        except ValueError as e:
+            # Indicator availability differs by vendor. Try the next configured vendor.
+            if method == "get_indicators":
+                logger.warning(
+                    "Vendor '%s' failed '%s' with ValueError (%s); trying next vendor",
+                    vendor,
+                    method,
+                    e,
+                )
+                last_error = e
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
 
     raise RuntimeError(f"No available vendor for '{method}'")

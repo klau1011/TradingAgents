@@ -230,3 +230,6 @@ tradingagents_env/
 
 # Generated results
 results/
+
+# Frontend dependency vendor tree
+web/frontend/node_modules/

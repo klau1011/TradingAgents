@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -59,6 +59,11 @@ def create_app() -> FastAPI:
         def spa_fallback(full_path: str):
             # API routes are matched before this fallback because FastAPI
             # dispatches in registration order; this only catches non-API URLs.
+            # Anything that *looks* like an API path but didn't match a real
+            # route should 404, not silently serve the SPA shell (which would
+            # hide typos and could mask traversal attempts).
+            if full_path == "api" or full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not found")
             target = static_dir / full_path
             if target.is_file():
                 return FileResponse(target)

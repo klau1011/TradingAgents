@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tradingagents.default_config import DEFAULT_CONFIG
+
+logger = logging.getLogger(__name__)
+
+_CORRUPT_PLACEHOLDER = "_(content unavailable: file could not be read)_"
 
 # Folder name patterns:
 #   legacy:  TICKER_YYYYMMDD_HHMMSS                       (e.g. MSFT_20260413_203023)
@@ -36,10 +41,21 @@ def _report_roots() -> List[Path]:
     return roots
 
 
-def list_reports() -> List[Dict[str, Any]]:
+def list_reports(include_incomplete: bool = False) -> List[Dict[str, Any]]:
+    """List discoverable report folders.
+
+    By default only folders containing ``complete_report.md`` are returned.
+    Pass ``include_incomplete=True`` to also surface in-progress / abandoned
+    folders with ``status="incomplete"`` so the UI can display them.
+    """
     seen: Dict[str, Dict[str, Any]] = {}
     for root in _report_roots():
-        for entry in root.iterdir():
+        try:
+            entries = list(root.iterdir())
+        except OSError as exc:
+            logger.warning("Could not list report root %s: %s", root, exc)
+            continue
+        for entry in entries:
             if not entry.is_dir():
                 continue
             m = _FOLDER_RE.match(entry.name)
@@ -52,23 +68,48 @@ def list_reports() -> List[Dict[str, Any]]:
             except ValueError:
                 continue
             complete = entry / "complete_report.md"
-            if not complete.exists():
+            is_complete = complete.exists()
+            if not is_complete and not include_incomplete:
                 continue
-            key = entry.name
-            decision = _peek_decision(entry)
-            seen[key] = {
+            seen[entry.name] = {
                 "folder": entry.name,
                 "ticker": m.group("ticker"),
                 "timestamp": ts.isoformat(),
                 "path": str(entry),
                 "root": str(root),
-                "decision": decision,
+                "decision": _peek_decision(entry) if is_complete else None,
+                "status": "complete" if is_complete else "incomplete",
             }
     return sorted(seen.values(), key=lambda r: r["timestamp"], reverse=True)
 
 
+_RATING_KEYWORDS = (
+    "STRONG BUY",
+    "STRONG SELL",
+    "OVERWEIGHT",
+    "UNDERWEIGHT",
+    "BUY",
+    "SELL",
+    "HOLD",
+)
+# Matches the explicit "Rating" line the Portfolio Manager writes at the top of
+# decision.md, e.g. "1. **Rating**: **Sell**" or "Rating: Strong Buy".
+_RATING_LINE_RE = re.compile(
+    r"rating\s*\**\s*[:\-]\s*\**\s*(strong\s+buy|strong\s+sell|overweight|underweight|buy|sell|hold)\b",
+    flags=re.IGNORECASE,
+)
+
+
 def _peek_decision(folder: Path) -> Optional[str]:
-    """Best-effort: extract a BUY/HOLD/SELL-style label from the portfolio file."""
+    """Best-effort: extract a BUY/HOLD/SELL-style label from the portfolio file.
+
+    Prefer the explicit ``**Rating**: **X**`` line written at the top of the
+    Portfolio Manager's decision; only fall back to keyword scanning if that
+    line is absent. A document-wide priority scan is unsafe because the
+    narrative often discusses other ratings (e.g. a Sell decision saying
+    "Hold is too passive"), which would cause the badge to disagree with the
+    actual decision.
+    """
     decision_file = folder / "5_portfolio" / "decision.md"
     if not decision_file.exists():
         return None
@@ -76,59 +117,88 @@ def _peek_decision(folder: Path) -> Optional[str]:
         text = decision_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    for keyword in (
-        "STRONG BUY",
-        "BUY",
-        "OVERWEIGHT",
-        "HOLD",
-        "UNDERWEIGHT",
-        "SELL",
-        "STRONG SELL",
-    ):
-        if re.search(rf"\b{keyword}\b", text, flags=re.IGNORECASE):
-            return keyword
+    m = _RATING_LINE_RE.search(text)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).upper()
+    # Fallback: scan only the first non-empty line, which is usually the rating.
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        for keyword in _RATING_KEYWORDS:
+            if re.search(rf"\b{keyword}\b", line, flags=re.IGNORECASE):
+                return keyword
+        break
     return None
+
+
+def _safe_read(path: Path) -> str:
+    """Read a markdown file without ever raising.
+
+    A single corrupt or unreadable file should not 500 the entire report
+    endpoint; substitute a placeholder and log instead.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("Could not read report file %s: %s", path, exc)
+        return _CORRUPT_PLACEHOLDER
+
+
+def _resolve_folder(safe: str, *, require_complete: bool = False) -> Optional[Path]:
+    """Resolve a folder name across report roots.
+
+    When multiple roots contain the same folder, prefer the later root to match
+    list_reports() overwrite semantics. For detail reads, callers can require a
+    complete report so an incomplete shadow in an earlier root does not mask a
+    complete folder in a later root.
+    """
+    chosen: Optional[Path] = None
+    for root in _report_roots():
+        candidate = root / safe
+        if not candidate.exists() or not candidate.is_dir():
+            continue
+        if require_complete and not (candidate / "complete_report.md").exists():
+            continue
+        chosen = candidate
+    return chosen
 
 
 def get_report(folder: str) -> Optional[Dict[str, Any]]:
     safe = _safe_folder(folder)
     if safe is None:
         return None
-    for root in _report_roots():
-        candidate = root / safe
-        if not candidate.exists() or not candidate.is_dir():
+    candidate = _resolve_folder(safe, require_complete=True)
+    if candidate is None:
+        return None
+    complete = candidate / "complete_report.md"
+    sections: Dict[str, Dict[str, str]] = {}
+    for sub in ("0_summary", "1_analysts", "2_research", "3_trading", "4_risk", "5_portfolio"):
+        sub_dir = candidate / sub
+        if not sub_dir.exists():
             continue
-        complete = candidate / "complete_report.md"
-        if not complete.exists():
+        try:
+            sub_entries = sorted(sub_dir.iterdir())
+        except OSError as exc:
+            logger.warning("Could not list report subdir %s: %s", sub_dir, exc)
             continue
-        sections: Dict[str, Dict[str, str]] = {}
-        for sub in ("0_summary", "1_analysts", "2_research", "3_trading", "4_risk", "5_portfolio"):
-            sub_dir = candidate / sub
-            if not sub_dir.exists():
-                continue
-            files: Dict[str, str] = {}
-            for f in sorted(sub_dir.iterdir()):
-                if f.suffix == ".md":
-                    files[f.stem] = f.read_text(encoding="utf-8", errors="replace")
-            if files:
-                sections[sub] = files
-        m = _FOLDER_RE.match(safe)
-        briefing_path = candidate / "0_summary" / "briefing.md"
-        briefing = (
-            briefing_path.read_text(encoding="utf-8", errors="replace")
-            if briefing_path.exists()
-            else None
-        )
-        return {
-            "folder": safe,
-            "ticker": m.group("ticker") if m else safe,
-            "briefing": briefing,
-            "complete_report": complete.read_text(encoding="utf-8", errors="replace"),
-            "sections": sections,
-            "decision": _peek_decision(candidate),
-            "path": str(candidate),
-        }
-    return None
+        files: Dict[str, str] = {}
+        for f in sub_entries:
+            if f.suffix == ".md":
+                files[f.stem] = _safe_read(f)
+        if files:
+            sections[sub] = files
+    m = _FOLDER_RE.match(safe)
+    briefing_path = candidate / "0_summary" / "briefing.md"
+    briefing = _safe_read(briefing_path) if briefing_path.exists() else None
+    return {
+        "folder": safe,
+        "ticker": m.group("ticker") if m else safe,
+        "briefing": briefing,
+        "complete_report": _safe_read(complete),
+        "sections": sections,
+        "decision": _peek_decision(candidate),
+        "path": str(candidate),
+    }
 
 
 def _safe_folder(folder: str) -> Optional[str]:

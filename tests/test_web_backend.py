@@ -66,3 +66,23 @@ def test_get_unknown_report_404(client) -> None:
 def test_report_folder_path_traversal_blocked(client) -> None:
     r = client.get("/api/reports/..%2F..%2Fetc%2Fpasswd")
     assert r.status_code == 404
+
+
+def test_spa_fallback_blocks_api_root(client) -> None:
+    r = client.get("/api")
+    assert r.status_code == 404
+
+
+def test_reports_index_include_incomplete_query(client, monkeypatch) -> None:
+    from web.backend import api as api_mod
+
+    captured = {}
+
+    def fake_list(include_incomplete: bool = False):
+        captured["include"] = include_incomplete
+        return []
+
+    monkeypatch.setattr(api_mod, "list_reports", fake_list)
+
+    client.get("/api/reports?include_incomplete=true")
+    assert captured["include"] is True

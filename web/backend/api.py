@@ -9,12 +9,15 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, field_validator
 
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
 
-from .reports import get_report, list_reports
+from .reports import (
+    get_report,
+    list_reports,
+)
 from .runs import registry
 from tradingagents.runner import RunnerConfig
 
@@ -219,8 +222,8 @@ async def stream_run(websocket: WebSocket, run_id: str) -> None:
 
 
 @router.get("/api/reports")
-def reports_index() -> Dict[str, Any]:
-    return {"reports": list_reports()}
+def reports_index(include_incomplete: bool = Query(False)) -> Dict[str, Any]:
+    return {"reports": list_reports(include_incomplete=include_incomplete)}
 
 
 @router.get("/api/reports/{folder}")

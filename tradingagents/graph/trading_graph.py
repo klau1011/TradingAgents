@@ -32,7 +32,11 @@ from tradingagents.agents.utils.agent_utils import (
     get_analyst_recommendations,
     get_news,
     get_insider_transactions,
-    get_global_news
+    get_global_news,
+    get_etf_profile,
+    get_etf_holdings,
+    get_etf_sector_weights,
+    get_etf_correlation,
 )
 
 from .conditional_logic import ConditionalLogic
@@ -166,6 +170,8 @@ class TradingAgentsGraph:
                     get_live_quote,
                     # Technical indicators
                     get_indicators,
+                    # Benchmark correlation (useful for ETFs)
+                    get_etf_correlation,
                 ]
             ),
             "social": ToolNode(
@@ -184,13 +190,18 @@ class TradingAgentsGraph:
             ),
             "fundamentals": ToolNode(
                 [
-                    # Fundamental analysis tools
+                    # Equity fundamentals
                     get_fundamentals,
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
                     get_insider_transactions,
                     get_analyst_recommendations,
+                    # ETF-specific fundamentals
+                    get_etf_profile,
+                    get_etf_holdings,
+                    get_etf_sector_weights,
+                    get_etf_correlation,
                 ]
             ),
         }

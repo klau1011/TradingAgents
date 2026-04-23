@@ -23,6 +23,12 @@ from .y_finance import (
     get_analyst_recommendations as get_yfinance_analyst_recommendations,
     get_live_quote as get_yfinance_live_quote,
 )
+from .y_finance_etf import (
+    get_etf_profile as get_yfinance_etf_profile,
+    get_etf_holdings as get_yfinance_etf_holdings,
+    get_etf_sector_weights as get_yfinance_etf_sector_weights,
+    get_etf_correlation as get_yfinance_etf_correlation,
+)
 from .yfinance_news import get_news_yfinance, get_global_news_yfinance
 from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
@@ -71,6 +77,15 @@ TOOLS_CATEGORIES = {
             "get_news",
             "get_global_news",
             "get_insider_transactions",
+        ]
+    },
+    "etf_data": {
+        "description": "ETF profile, holdings, sector weights, and benchmark correlation",
+        "tools": [
+            "get_etf_profile",
+            "get_etf_holdings",
+            "get_etf_sector_weights",
+            "get_etf_correlation",
         ]
     }
 }
@@ -127,6 +142,19 @@ VENDOR_METHODS = {
     },
     "get_live_quote": {
         "yfinance": get_yfinance_live_quote,
+    },
+    # etf_data
+    "get_etf_profile": {
+        "yfinance": get_yfinance_etf_profile,
+    },
+    "get_etf_holdings": {
+        "yfinance": get_yfinance_etf_holdings,
+    },
+    "get_etf_sector_weights": {
+        "yfinance": get_yfinance_etf_sector_weights,
+    },
+    "get_etf_correlation": {
+        "yfinance": get_yfinance_etf_correlation,
     },
 }
 

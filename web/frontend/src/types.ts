@@ -1,6 +1,6 @@
 /** Wire-format mirroring tradingagents/runner_events.py */
 
-export type RunStatus = "queued" | "running" | "done" | "error";
+export type RunStatus = "queued" | "running" | "done" | "error" | "cancelled";
 export type AgentStatus = "pending" | "in_progress" | "completed" | "error";
 
 export interface StatusEvent {
@@ -67,6 +67,10 @@ export interface RunSummary {
   decision: string | null;
   report_path: string | null;
   error: string | null;
+}
+
+export interface RunDetail extends RunSummary {
+  events: RunEvent[];
 }
 
 export interface ConfigOptions {

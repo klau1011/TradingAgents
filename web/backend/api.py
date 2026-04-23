@@ -188,6 +188,28 @@ def get_run(run_id: str) -> Dict[str, Any]:
     }
 
 
+@router.delete("/api/runs/{run_id}")
+def cancel_run(run_id: str) -> Dict[str, Any]:
+    """Request cancellation of a queued or running analysis.
+
+    Returns the *response* status, which is one of:
+
+    * ``"cancelling"`` \u2014 cancel was accepted; the run is still winding down.
+      Once it actually stops, ``RunRecord.status`` flips to ``"cancelled"``
+      and a corresponding ``StatusEvent`` is emitted on the WebSocket.
+    * ``"done" | "error" | "cancelled"`` \u2014 the run was already terminal;
+      no signal was issued.
+
+    The transient ``"cancelling"`` value is *never* persisted to the run
+    record nor emitted on the event stream; it only describes this HTTP
+    response.
+    """
+    new_status = registry.cancel(run_id)
+    if new_status is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"run_id": run_id, "status": new_status}
+
+
 @router.websocket("/api/runs/{run_id}/stream")
 async def stream_run(websocket: WebSocket, run_id: str) -> None:
     await websocket.accept()

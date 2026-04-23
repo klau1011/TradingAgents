@@ -18,11 +18,17 @@ It is intentionally synchronous; callers that need async behavior should run
 from __future__ import annotations
 
 import datetime
+import threading
 import traceback
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+
+class RunCancelled(Exception):
+    """Raised inside the runner when an external cancel is requested."""
+
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -179,10 +185,13 @@ class AnalysisRunner:
         on_event: Optional[EventCallback] = None,
         save_dir: Optional[Path] = None,
         callbacks: Optional[List[Any]] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         self.config = config
         self.on_event = on_event or (lambda _e: None)
         self.callbacks = callbacks or []
+        # Cooperative cancellation: checked between graph chunks.
+        self.cancel_event = cancel_event or threading.Event()
 
         graph_config = config.to_graph_config()
         self._graph_config = graph_config
@@ -282,6 +291,15 @@ class AnalysisRunner:
             self._emit(StatusEvent(status="done"))
             return final_state
 
+        except RunCancelled:
+            self._emit(
+                MessageEvent(
+                    message_type="System",
+                    content="Run cancelled by user.",
+                )
+            )
+            self._emit(StatusEvent(status="cancelled"))
+            raise
         except Exception as exc:  # noqa: BLE001
             self._emit(
                 ErrorEvent(message=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
@@ -296,6 +314,8 @@ class AnalysisRunner:
     def _stream(self, graph, init_state, args) -> Dict[str, Any]:
         trace = []
         for chunk in graph.graph.stream(init_state, **args):
+            if self.cancel_event.is_set():
+                raise RunCancelled("Run cancelled by user")
             self._process_chunk(chunk)
             trace.append(chunk)
         if not trace:

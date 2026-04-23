@@ -1,8 +1,11 @@
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Activity, FileText, ArrowRight } from "lucide-react";
 import { api } from "../api";
 import { Card } from "../components/ui/Card";
 import { DecisionBadge, StatusBadge } from "../components/ui/StatusBadge";
+import { EmptyState } from "../components/ui/EmptyState";
+import { SkeletonTable } from "../components/ui/Skeleton";
 
 export function HistoryPage() {
   const reports = useQuery({ queryKey: ["reports"], queryFn: api.listReports });
@@ -26,7 +29,9 @@ export function HistoryPage() {
       <section className="space-y-6">
         <h2 className="font-display text-section font-medium">Active runs</h2>
         <Card>
-          {runs.data && runs.data.length > 0 ? (
+          {runs.isLoading ? (
+            <SkeletonTable rows={3} cols={6} />
+          ) : runs.data && runs.data.length > 0 ? (
             <table className="w-full text-left">
               <thead>
                 <tr className="text-muted font-display text-body-em uppercase tracking-wider text-xs">
@@ -61,9 +66,9 @@ export function HistoryPage() {
                     <td className="py-3 text-right">
                       <Link
                         to={`/runs/${r.run_id}`}
-                        className="font-display text-body-em text-rui-blue hover:opacity-85"
+                        className="inline-flex items-center gap-1 font-display text-body-em text-rui-blue hover:opacity-85"
                       >
-                        Open →
+                        Open <ArrowRight size={14} aria-hidden="true" />
                       </Link>
                     </td>
                   </tr>
@@ -71,7 +76,11 @@ export function HistoryPage() {
               </tbody>
             </table>
           ) : (
-            <p className="text-muted text-body">No active runs.</p>
+            <EmptyState
+              icon={Activity}
+              title="No active runs"
+              description="Start a new analysis from the New Run page to see live progress here."
+            />
           )}
         </Card>
       </section>
@@ -80,7 +89,7 @@ export function HistoryPage() {
         <h2 className="font-display text-section font-medium">Saved reports</h2>
         <Card>
           {reports.isLoading ? (
-            <p className="text-muted text-body">Loading…</p>
+            <SkeletonTable rows={5} cols={4} />
           ) : reports.data && reports.data.length > 0 ? (
             <table className="w-full text-left">
               <thead>
@@ -110,9 +119,9 @@ export function HistoryPage() {
                     <td className="py-3 text-right">
                       <Link
                         to={`/reports/${encodeURIComponent(r.folder)}`}
-                        className="font-display text-body-em text-rui-blue hover:opacity-85"
+                        className="inline-flex items-center gap-1 font-display text-body-em text-rui-blue hover:opacity-85"
                       >
-                        View →
+                        View <ArrowRight size={14} aria-hidden="true" />
                       </Link>
                     </td>
                   </tr>
@@ -120,7 +129,11 @@ export function HistoryPage() {
               </tbody>
             </table>
           ) : (
-            <p className="text-muted text-body">No saved reports yet.</p>
+            <EmptyState
+              icon={FileText}
+              title="No saved reports yet"
+              description="Completed analyses are written to disk and will appear here."
+            />
           )}
         </Card>
       </section>

@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
-from tradingagents.runner import AnalysisRunner, RunnerConfig
+from tradingagents.runner import AnalysisRunner, RunCancelled, RunnerConfig
 from tradingagents.runner_events import (
+    MessageEvent,
     RunEvent,
     StatusEvent,
     event_to_dict,
@@ -33,7 +35,11 @@ SUBSCRIBER_QUEUE_SIZE = 1000
 class RunRecord:
     run_id: str
     config: RunnerConfig
-    status: str = "queued"  # queued | running | done | error
+    # Stored lifecycle status. Only the terminal values "done", "error",
+    # and "cancelled" are reported via WS StatusEvent. The transient
+    # "cancelling" value (returned by ``DELETE /api/runs/{id}``) is *never*
+    # stored here — it lives only in the HTTP response.
+    status: str = "queued"  # queued | running | done | error | cancelled
     queue_position: Optional[int] = None
     created_at: str = field(
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -47,6 +53,13 @@ class RunRecord:
     # Internal: bounded event log + live subscribers
     events: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER_SIZE))
     subscribers: List[asyncio.Queue] = field(default_factory=list)
+    # Cooperative cancel signal. Inspected by the AnalysisRunner's chunk loop
+    # (worker thread) and by ``_execute`` before transitioning out of queued.
+    # ``threading.Event`` is thread-safe and provides cross-thread visibility
+    # so the cancel can be requested from the FastAPI threadpool while the
+    # run executes in a different threadpool worker.
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    task: Optional[asyncio.Task] = None
 
     def to_summary(self) -> Dict[str, Any]:
         return {
@@ -101,7 +114,7 @@ class RunRegistry:
             StatusEvent(status="queued", queue_position=record.queue_position),
         )
 
-        asyncio.create_task(self._execute(record))
+        record.task = asyncio.create_task(self._execute(record))
         return record
 
     def _compute_queue_position(self, record: RunRecord) -> Optional[int]:
@@ -115,9 +128,43 @@ class RunRegistry:
         # Drop terminal runs that fall outside the recent window
         live_ids = {rid for rid in self._order}
         for rid in list(self._runs.keys()):
-            if rid not in live_ids and self._runs[rid].status in {"done", "error"}:
+            if rid not in live_ids and self._runs[rid].status in {
+                "done",
+                "error",
+                "cancelled",
+            }:
                 self._runs.pop(rid, None)
 
+    def cancel(self, run_id: str) -> Optional[str]:
+        """Request cancellation of a run.
+
+        This method is safe to invoke from any thread — the only state it
+        mutates is :class:`threading.Event`, and ``_runs`` reads/status reads
+        are atomic in CPython. The method itself is synchronous; it returns
+        immediately after signaling cancellation.
+
+        Returns
+        -------
+        Optional[str]
+            * ``None`` if the run id isn't known.
+            * The terminal status (``"done" | "error" | "cancelled"``) when
+              the run already finished — nothing is signaled in that case.
+            * ``"cancelling"`` when a cooperative cancel was requested. This
+              value is *never* persisted to ``RunRecord.status`` nor emitted
+              on the WebSocket; it only describes the HTTP response. Once
+              the run actually winds down, ``RunRecord.status`` flips to
+              ``"cancelled"`` and a corresponding ``StatusEvent`` is emitted.
+        """
+        record = self._runs.get(run_id)
+        if record is None:
+            return None
+        if record.status in {"done", "error", "cancelled"}:
+            return record.status
+        # Idempotent: setting an already-set Event is a no-op. The running
+        # graph stream picks up the flag between chunks; queued runs are
+        # short-circuited in _execute before the runner ever starts.
+        record.cancel_event.set()
+        return "cancelling"
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -125,6 +172,26 @@ class RunRegistry:
     async def _execute(self, record: RunRecord) -> None:
         sem = self._ensure_semaphore()
         async with sem:
+            # Cancelled while queued -> never start. Mirror the running-cancel
+            # event sequence (system message + status event) for parity in
+            # the activity feed.
+            if record.cancel_event.is_set():
+                record.status = "cancelled"
+                record.finished_at = datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat()
+                self._record_event(
+                    record,
+                    MessageEvent(
+                        message_type="System",
+                        content="Run cancelled before it started.",
+                    ),
+                )
+                self._record_event(record, StatusEvent(status="cancelled"))
+                for q in list(record.subscribers):
+                    self._close_subscriber(record, q)
+                return
+
             record.status = "running"
             record.queue_position = None
             record.started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -139,6 +206,7 @@ class RunRegistry:
             runner = AnalysisRunner(
                 config=record.config,
                 on_event=on_event,
+                cancel_event=record.cancel_event,
             )
 
             try:
@@ -150,6 +218,8 @@ class RunRegistry:
                     if ev.get("type") == "done":
                         record.decision = ev.get("decision")
                         break
+            except RunCancelled:
+                record.status = "cancelled"
             except Exception as exc:  # noqa: BLE001
                 record.status = "error"
                 record.error = f"{type(exc).__name__}: {exc}"
@@ -157,6 +227,23 @@ class RunRegistry:
                 record.finished_at = datetime.datetime.now(
                     datetime.timezone.utc
                 ).isoformat()
+                # Defense-in-depth: guarantee a terminal StatusEvent reaches
+                # subscribers even if the runner exited without emitting one
+                # (e.g. test stubs, or a future runner that crashes before
+                # the emit). Idempotent on the client side: the WS reducer
+                # overwrites ``status`` on each event.
+                last_status = next(
+                    (
+                        ev.get("status")
+                        for ev in reversed(record.events)
+                        if ev.get("type") == "status"
+                    ),
+                    None,
+                )
+                if last_status != record.status:
+                    self._record_event(
+                        record, StatusEvent(status=record.status)  # type: ignore[arg-type]
+                    )
                 # Close all subscriber queues so WS endpoints exit gracefully
                 for q in list(record.subscribers):
                     self._close_subscriber(record, q)

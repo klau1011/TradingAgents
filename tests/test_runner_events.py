@@ -178,3 +178,130 @@ def test_runner_config_normalizes_and_validates_analysts() -> None:
             analysis_date="2025-01-02",
             analysts=["market", "invalid"],
         )
+
+
+# ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+
+def test_run_status_includes_cancelled() -> None:
+    """The wire-format Literal must list ``cancelled`` so type checkers and the
+    TS mirror in ``web/frontend/src/types.ts`` stay aligned."""
+    import typing
+
+    from tradingagents.runner_events import RunStatus
+
+    assert "cancelled" in typing.get_args(RunStatus)
+
+
+def test_runner_raises_run_cancelled_when_event_set_before_start(
+    tmp_path: Path,
+) -> None:
+    """Pre-set cancel events must be honored on the very first chunk."""
+    import threading
+
+    from tradingagents.runner import RunCancelled
+    from tradingagents.runner_events import (
+        ErrorEvent,
+        MessageEvent,
+        StatusEvent,
+    )
+
+    events: list = []
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    cfg = RunnerConfig(
+        ticker="TEST",
+        analysis_date="2025-01-02",
+        analysts=["market"],
+    )
+    with patch.object(runner_mod, "TradingAgentsGraph", _StubGraph):
+        runner = AnalysisRunner(
+            config=cfg,
+            on_event=events.append,
+            save_dir=tmp_path,
+            cancel_event=cancel_event,
+        )
+        with pytest.raises(RunCancelled):
+            runner.run()
+
+    statuses = [e.status for e in events if isinstance(e, StatusEvent)]
+    # Lifecycle: running -> cancelled (no done, no error).
+    assert statuses[0] == "running"
+    assert statuses[-1] == "cancelled"
+    assert "done" not in statuses and "error" not in statuses
+    # User-facing message went out.
+    assert any(
+        isinstance(e, MessageEvent) and "cancelled" in e.content.lower()
+        for e in events
+    )
+    # No ErrorEvent for cooperative cancel.
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+
+
+def test_runner_cancels_mid_stream_between_chunks(tmp_path: Path) -> None:
+    """The cancel flag is checked between chunks; setting it after the first
+    chunk yields cancellation before subsequent chunks run."""
+    import threading
+
+    from tradingagents.runner import RunCancelled
+    from tradingagents.runner_events import StatusEvent
+
+    cancel_event = threading.Event()
+    chunks_seen: list[int] = []
+
+    class _LongInner:
+        def stream(self, init_state, **kwargs):
+            for i in range(10):
+                chunks_seen.append(i)
+                if i == 1:
+                    # Trip cancel after the second chunk has been processed;
+                    # the loop should bail before chunk 2 emits anything.
+                    cancel_event.set()
+                yield {"messages": [], "market_report": f"chunk {i}"}
+
+    class _LongGraph:
+        def __init__(self, *_, **__):
+            self.propagator = _StubPropagator()
+            self.graph = _LongInner()
+
+        def process_signal(self, decision: str) -> str:
+            return "BUY"
+
+    cfg = RunnerConfig(
+        ticker="LONG",
+        analysis_date="2025-01-02",
+        analysts=["market"],
+    )
+    events: list = []
+    with patch.object(runner_mod, "TradingAgentsGraph", _LongGraph):
+        runner = AnalysisRunner(
+            config=cfg,
+            on_event=events.append,
+            save_dir=tmp_path,
+            cancel_event=cancel_event,
+        )
+        with pytest.raises(RunCancelled):
+            runner.run()
+
+    # We only consumed 2 chunks before bailing (cancel set after chunk 1).
+    assert chunks_seen == [0, 1]
+    statuses = [e.status for e in events if isinstance(e, StatusEvent)]
+    assert statuses[-1] == "cancelled"
+
+
+def test_runner_default_cancel_event_does_not_cancel(tmp_path: Path) -> None:
+    """When no cancel_event is provided, the runner constructs an unset one and
+    the run completes normally."""
+    cfg = RunnerConfig(
+        ticker="OK",
+        analysis_date="2025-01-02",
+        analysts=["market"],
+    )
+    with patch.object(runner_mod, "TradingAgentsGraph", _StubGraph):
+        runner = AnalysisRunner(config=cfg, save_dir=tmp_path)
+        assert runner.cancel_event is not None
+        assert not runner.cancel_event.is_set()
+        runner.run()  # no exception -> success

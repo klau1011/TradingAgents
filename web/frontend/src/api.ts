@@ -2,6 +2,7 @@ import type {
   ConfigOptions,
   ReportDetail,
   ReportSummary,
+  RunDetail,
   RunSummary,
 } from "./types";
 
@@ -23,8 +24,11 @@ export const api = {
     }).then(json<RunSummary>),
   listRuns: () =>
     fetch("/api/runs").then(json<{ runs: RunSummary[] }>).then((r) => r.runs),
-  getRun: (id: string) =>
-    fetch(`/api/runs/${id}`).then(json<RunSummary & { events: unknown[] }>),
+  getRun: (id: string) => fetch(`/api/runs/${id}`).then(json<RunDetail>),
+  cancelRun: (id: string) =>
+    fetch(`/api/runs/${id}`, { method: "DELETE" }).then(
+      json<{ run_id: string; status: string }>
+    ),
   listReports: () =>
     fetch("/api/reports")
       .then(json<{ reports: ReportSummary[] }>)

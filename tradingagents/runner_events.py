@@ -16,7 +16,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-RunStatus = Literal["queued", "running", "done", "error"]
+RunStatus = Literal["queued", "running", "done", "error", "cancelled"]
 AgentStatus = Literal["pending", "in_progress", "completed", "error"]
 
 

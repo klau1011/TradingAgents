@@ -2,11 +2,14 @@ import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { ArrowLeft, AlertTriangle } from "lucide-react";
 
 import { api } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { DecisionBadge } from "../components/ui/StatusBadge";
+import { EmptyState } from "../components/ui/EmptyState";
+import { Skeleton, SkeletonCard, SkeletonText } from "../components/ui/Skeleton";
 
 const SUBFOLDER_TITLES: Record<string, string> = {
   "0_summary": "Investor Briefing",
@@ -26,11 +29,47 @@ export function ReportPage() {
   });
 
   if (isLoading)
-    return <div className="p-32p text-body text-muted">Loading…</div>;
+    return (
+      <div className="space-y-0">
+        <section className="bg-inverse text-inverse-fg px-32p py-80p">
+          <div className="mx-auto max-w-5xl space-y-6">
+            <Skeleton
+              className="h-4 w-48 bg-inverse-fg/20"
+              rounded="rounded-pill"
+            />
+            <Skeleton
+              className="h-12 w-2/3 bg-inverse-fg/20"
+              rounded="rounded-pill"
+            />
+            <SkeletonText lines={2} className="opacity-30" />
+          </div>
+        </section>
+        <section className="bg-surface px-32p py-80p">
+          <div className="mx-auto max-w-5xl space-y-32p">
+            <SkeletonCard />
+            <SkeletonCard />
+            <SkeletonCard />
+          </div>
+        </section>
+      </div>
+    );
   if (error || !data)
     return (
-      <div className="p-32p text-body text-rui-danger">
-        Could not load report.
+      <div className="mx-auto max-w-5xl px-32p py-80p">
+        <EmptyState
+          icon={AlertTriangle}
+          title="Could not load report"
+          description={
+            error
+              ? String(error)
+              : "This report may have been moved or deleted."
+          }
+          action={
+            <Link to="/history">
+              <Button variant="primary">Back to history</Button>
+            </Link>
+          }
+        />
       </div>
     );
 
@@ -45,7 +84,10 @@ export function ReportPage() {
           <div className="flex items-center gap-4">
             {data.decision && <DecisionBadge decision={data.decision} />}
             <Link to="/history">
-              <Button variant="ghost">Back to history</Button>
+              <Button variant="ghost">
+                <ArrowLeft size={16} aria-hidden="true" />
+                Back to history
+              </Button>
             </Link>
           </div>
         </div>

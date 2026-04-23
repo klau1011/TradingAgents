@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { Play, History as HistoryIcon } from "lucide-react";
 import { api } from "../api";
 import { Button } from "../components/ui/Button";
-import { Card, SectionHeading } from "../components/ui/Card";
+import { Card } from "../components/ui/Card";
+import { Skeleton, SkeletonCard, SkeletonText } from "../components/ui/Skeleton";
 
 export function NewRunPage() {
   const navigate = useNavigate();
@@ -11,6 +13,26 @@ export function NewRunPage() {
     queryKey: ["options"],
     queryFn: api.options,
   });
+  // Used purely to feed the ticker datalist with previously-analyzed symbols.
+  // These queries are cached by react-query so they fold into existing pages.
+  const runs = useQuery({ queryKey: ["runs"], queryFn: api.listRuns });
+  const reports = useQuery({
+    queryKey: ["reports"],
+    queryFn: api.listReports,
+  });
+
+  const tickerSuggestions = useMemo(() => {
+    const set = new Set<string>();
+    runs.data?.forEach((r) => r.ticker && set.add(r.ticker.toUpperCase()));
+    reports.data?.forEach(
+      (r) => r.ticker && set.add(r.ticker.toUpperCase())
+    );
+    // A few sensible defaults so the dropdown isn't empty on first load.
+    ["SPY", "QQQ", "AAPL", "NVDA", "MSFT", "TSLA"].forEach((t) =>
+      set.add(t)
+    );
+    return Array.from(set).sort();
+  }, [runs.data, reports.data]);
 
   const today = new Date().toISOString().slice(0, 10);
   const [ticker, setTicker] = useState("SPY");
@@ -73,7 +95,15 @@ export function NewRunPage() {
   }
 
   if (isLoading || !opts)
-    return <div className="p-32p text-body text-muted">Loading…</div>;
+    return (
+      <div className="mx-auto max-w-5xl px-32p py-80p space-y-80p">
+        <header className="space-y-6">
+          <Skeleton className="h-12 w-2/3" rounded="rounded-pill" />
+          <SkeletonText lines={2} />
+        </header>
+        <SkeletonCard />
+      </div>
+    );
 
   return (
     <div className="mx-auto max-w-5xl px-32p py-80p space-y-80p">
@@ -96,8 +126,16 @@ export function NewRunPage() {
                 onChange={(e) => setTicker(e.target.value.toUpperCase())}
                 className={inputCls}
                 placeholder="SPY, CNC.TO, 7203.T"
+                list="ticker-suggestions"
+                autoComplete="off"
+                spellCheck={false}
                 required
               />
+              <datalist id="ticker-suggestions">
+                {tickerSuggestions.map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
             </Field>
             <Field label="Analysis date">
               <input
@@ -263,6 +301,7 @@ export function NewRunPage() {
 
           <div className="flex flex-wrap items-center gap-4">
             <Button type="submit" disabled={submitting || analysts.length === 0}>
+              <Play size={16} aria-hidden="true" />
               {submitting ? "Starting…" : "Run analysis"}
             </Button>
             <Button
@@ -270,6 +309,7 @@ export function NewRunPage() {
               variant="outlined"
               onClick={() => navigate("/history")}
             >
+              <HistoryIcon size={16} aria-hidden="true" />
               View history
             </Button>
           </div>
@@ -299,6 +339,3 @@ function Field({
     </label>
   );
 }
-
-// silence unused-import linter for SectionHeading (kept for future use)
-void SectionHeading;

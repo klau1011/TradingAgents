@@ -1,8 +1,20 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useMutation } from "@tanstack/react-query";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  History as HistoryIcon,
+  MessageSquare,
+  PlusCircle,
+  Square,
+  Wrench,
+} from "lucide-react";
 
+import { api } from "../api";
 import { useRunStream } from "../hooks/useRunStream";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
@@ -10,6 +22,10 @@ import {
   DecisionBadge,
   StatusBadge,
 } from "../components/ui/StatusBadge";
+import { EmptyState } from "../components/ui/EmptyState";
+import { SkeletonText } from "../components/ui/Skeleton";
+import { AgentTimeline } from "../components/AgentTimeline";
+import { previewDecision } from "../utils/decision";
 import { SECTION_LABELS } from "../types";
 
 export function RunPage() {
@@ -18,6 +34,19 @@ export function RunPage() {
 
   const reportEntries = Object.entries(state.reports);
   const latestReport = reportEntries[reportEntries.length - 1];
+
+  const cancellable =
+    state.status === "queued" || state.status === "running";
+
+  const cancelMutation = useMutation({
+    mutationFn: () => api.cancelRun(runId!),
+  });
+
+  // Live preview of the Portfolio Manager's decision while the section streams.
+  const liveDecision = useMemo(
+    () => previewDecision(state.reports["final_trade_decision"]),
+    [state.reports]
+  );
 
   return (
     <div className="space-y-0">
@@ -40,25 +69,75 @@ export function RunPage() {
                         ? "Analyzing…"
                         : state.status === "error"
                           ? "Errored"
-                          : "Done"}
+                          : state.status === "cancelled"
+                            ? "Cancelled"
+                            : "Done"}
                   </span>
                 )}
               </h1>
             </div>
-            <StatusBadge status={state.status} kind="run" />
+            <div className="flex items-center gap-3">
+              <StatusBadge status={state.status} kind="run" />
+              {cancellable && (
+                <Button
+                  variant="danger"
+                  type="button"
+                  disabled={
+                    cancelMutation.isPending || cancelMutation.isSuccess
+                  }
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Cancel this run? In-flight LLM calls will finish before the run stops."
+                      )
+                    ) {
+                      cancelMutation.mutate();
+                    }
+                  }}
+                  title="Cancel run"
+                >
+                  <Square size={16} aria-hidden="true" />
+                  {cancelMutation.isPending
+                    ? "Cancelling…"
+                    : cancelMutation.isSuccess
+                      ? "Cancelling…"
+                      : "Cancel run"}
+                </Button>
+              )}
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {state.agentOrder.map((agent) => (
-              <div
-                key={agent}
-                className="flex items-center justify-between rounded-card bg-inverse-fg/5 px-4 py-3 border border-inverse-fg/10"
-              >
-                <span className="font-display text-body-em">{agent}</span>
-                <StatusBadge status={state.agents[agent]} />
-              </div>
-            ))}
-          </div>
+          {/* Live decision preview — shown while still running. */}
+          {!state.decision && liveDecision && (
+            <div className="flex items-center gap-3">
+              <span className="font-display text-xs uppercase tracking-wider text-inverse-fg/60">
+                Tentative
+              </span>
+              <DecisionBadge decision={liveDecision} preview />
+            </div>
+          )}
+
+          {/* Agent timeline — replaces the static status pill grid. */}
+          {state.agentOrder.length > 0 ? (
+            <AgentTimeline
+              agentOrder={state.agentOrder}
+              agents={state.agents}
+              timeline={state.agentTimeline}
+              runStartedAt={state.runStartedAt}
+              runFinishedAt={state.runFinishedAt}
+            />
+          ) : state.backfilling ? (
+            <SkeletonText lines={6} className="opacity-30" />
+          ) : null}
+
+          {state.reconnecting && (
+            <Card className="bg-rui-yellow/10 text-rui-yellow border-rui-yellow/30">
+              <p className="font-display text-body-em">Connection interrupted. Reconnecting…</p>
+              {state.lastError && (
+                <p className="mt-2 text-body">{state.lastError}</p>
+              )}
+            </Card>
+          )}
 
           {state.error && (
             <Card className="bg-rui-danger text-white border-0">
@@ -67,12 +146,26 @@ export function RunPage() {
             </Card>
           )}
 
-          <div className="flex gap-4">
+          {cancelMutation.isError && (
+            <Card className="bg-rui-danger/10 text-rui-danger border-rui-danger/30">
+              <p className="font-display text-body-em">
+                Could not cancel: {String(cancelMutation.error)}
+              </p>
+            </Card>
+          )}
+
+          <div className="flex flex-wrap gap-4">
             <Link to="/">
-              <Button variant="ghost">New run</Button>
+              <Button variant="ghost">
+                <PlusCircle size={16} aria-hidden="true" />
+                New run
+              </Button>
             </Link>
             <Link to="/history">
-              <Button variant="ghost">History</Button>
+              <Button variant="ghost">
+                <HistoryIcon size={16} aria-hidden="true" />
+                History
+              </Button>
             </Link>
           </div>
         </div>
@@ -85,7 +178,9 @@ export function RunPage() {
             <h2 className="font-display text-card font-medium mb-4">
               {latestReport
                 ? SECTION_LABELS[latestReport[0]] ?? latestReport[0]
-                : "Awaiting first report…"}
+                : state.backfilling
+                  ? "Loading report…"
+                  : "Awaiting first report"}
             </h2>
             {latestReport ? (
               <article className="md-body">
@@ -93,10 +188,13 @@ export function RunPage() {
                   {latestReport[1]}
                 </ReactMarkdown>
               </article>
+            ) : state.backfilling ? (
+              <SkeletonText lines={6} />
             ) : (
-              <p className="text-muted text-body">
-                Reports will stream in as each agent finishes.
-              </p>
+              <EmptyState
+                title="No report yet"
+                description="Reports will stream in here as each agent finishes its section."
+              />
             )}
 
             {reportEntries.length > 1 && (
@@ -123,6 +221,7 @@ export function RunPage() {
           </Card>
 
           <ActivityFeed
+            backfilling={state.backfilling}
             messages={state.messages}
             toolCalls={state.toolCalls}
           />
@@ -136,7 +235,10 @@ export function RunPage() {
               Report saved to <code className="text-fg">{state.reportPath}</code>
             </p>
             <Link to="/history">
-              <Button variant="primary">Open in history</Button>
+              <Button variant="primary">
+                Open in history
+                <ArrowRight size={16} aria-hidden="true" />
+              </Button>
             </Link>
           </div>
         </section>
@@ -146,9 +248,11 @@ export function RunPage() {
 }
 
 function ActivityFeed({
+  backfilling,
   messages,
   toolCalls,
 }: {
+  backfilling: boolean;
   messages: { ts: string; type: string; content: string }[];
   toolCalls: { ts: string; name: string; args: Record<string, unknown> }[];
 }) {
@@ -169,29 +273,60 @@ function ActivityFeed({
     })),
   ].sort((a, b) => a.ts.localeCompare(b.ts));
 
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+
   return (
     <Card className="max-h-[80vh] overflow-hidden flex flex-col">
       <h2 className="font-display text-card font-medium mb-4">Activity</h2>
       <div ref={ref} className="flex-1 overflow-y-auto space-y-3 pr-2">
-        {items.map((it, idx) => (
-          <div key={idx} className="border-b border-edge/60 pb-2 last:border-0">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="font-display text-xs text-subtle">
-                {it.ts.slice(11, 19)}
-              </span>
-              <span className="font-display text-xs uppercase tracking-wider text-muted">
-                {it.kind}
-              </span>
+        {items.map((it, idx) => {
+          const isLong = it.text.length > 280;
+          const isOpen = !!expanded[idx];
+          const text = isLong && !isOpen ? it.text.slice(0, 280) + "…" : it.text;
+          const Icon = kindIcon(it.kind);
+          return (
+            <div key={idx} className="border-b border-edge/60 pb-2 last:border-0">
+              <div className="flex items-center gap-2 mb-1">
+                <Icon size={12} className="text-muted" aria-hidden="true" />
+                <span className="font-display text-xs text-subtle">
+                  {it.ts.slice(11, 19)}
+                </span>
+                <span className="font-display text-xs uppercase tracking-wider text-muted">
+                  {it.kind}
+                </span>
+              </div>
+              <p className="text-body-em text-fg break-words">{text}</p>
+              {isLong && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpanded((s) => ({ ...s, [idx]: !s[idx] }))
+                  }
+                  className="mt-1 font-display text-xs text-rui-blue hover:opacity-85"
+                >
+                  {isOpen ? "Show less" : "Show more"}
+                </button>
+              )}
             </div>
-            <p className="text-body-em text-fg break-words">
-              {it.text.length > 280 ? it.text.slice(0, 280) + "…" : it.text}
-            </p>
-          </div>
-        ))}
-        {items.length === 0 && (
-          <p className="text-muted text-body">Waiting for events…</p>
-        )}
+          );
+        })}
+        {items.length === 0 &&
+          (backfilling ? (
+            <SkeletonText lines={6} />
+          ) : (
+            <EmptyState
+              icon={Activity}
+              title="Waiting for events"
+              description="The agent stream will appear here as soon as the run starts."
+            />
+          ))}
       </div>
     </Card>
   );
+}
+
+function kindIcon(kind: string) {
+  if (kind === "Tool") return Wrench;
+  if (kind === "System" || kind === "Control") return AlertTriangle;
+  return MessageSquare;
 }

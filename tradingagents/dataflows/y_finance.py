@@ -366,13 +366,22 @@ def get_fundamentals(
     ticker: Annotated[str, "ticker symbol of the company"],
     curr_date: Annotated[str, "current date (not used for yfinance)"] = None
 ):
-    """Get company fundamentals overview from yfinance."""
+    """Get company fundamentals overview from yfinance.
+
+    For ETFs, transparently delegates to ``get_etf_profile`` so callers that
+    are unaware of the instrument type still receive useful data instead of
+    an equity field list full of blanks.
+    """
     try:
         ticker_obj = yf.Ticker(ticker.upper())
         info = yf_retry(lambda: ticker_obj.info)
 
         if not info:
             return f"No fundamentals data found for symbol '{ticker}'"
+
+        if str(info.get("quoteType", "")).upper() == "ETF":
+            from .y_finance_etf import get_etf_profile
+            return get_etf_profile(ticker, curr_date)
 
         fields = [
             ("Name", info.get("longName")),

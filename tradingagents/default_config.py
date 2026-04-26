@@ -1,6 +1,64 @@
 import os
+from typing import Dict, List, Tuple
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
+
+
+# ---------------------------------------------------------------------------
+# Analyst / report metadata (single source of truth)
+#
+# Imported by the CLI, the headless runner, and the FastAPI backend so that
+# adding or renaming an analyst only requires changes here.
+# ---------------------------------------------------------------------------
+
+# Canonical order analysts run / are displayed in.
+ANALYST_ORDER: List[str] = ["market", "social", "news", "fundamentals"]
+
+# Analyst key -> human-readable agent name used in event streams and CLI UI.
+ANALYST_DISPLAY_NAMES: Dict[str, str] = {
+    "market": "Market Analyst",
+    "social": "Social Analyst",
+    "news": "News Analyst",
+    "fundamentals": "Fundamentals Analyst",
+}
+
+# Analyst key -> AgentState report-section key holding that analyst's output.
+ANALYST_REPORT_MAP: Dict[str, str] = {
+    "market": "market_report",
+    "social": "sentiment_report",
+    "news": "news_report",
+    "fundamentals": "fundamentals_report",
+}
+
+# Fixed (non-user-selectable) teams and their agents, in execution order.
+FIXED_AGENTS: Dict[str, List[str]] = {
+    "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
+    "Trading Team": ["Trader"],
+    "Risk Management": [
+        "Aggressive Analyst",
+        "Neutral Analyst",
+        "Conservative Analyst",
+    ],
+    "Portfolio Management": ["Portfolio Manager"],
+    "Investor Briefing": ["Investor Briefing"],
+}
+
+# Report section -> (analyst_key controlling inclusion, finalizing agent name).
+# analyst_key=None means the section is always included.
+REPORT_SECTIONS: Dict[str, Tuple] = {
+    "market_report": ("market", "Market Analyst"),
+    "sentiment_report": ("social", "Social Analyst"),
+    "news_report": ("news", "News Analyst"),
+    "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
+    "investment_plan": (None, "Research Manager"),
+    "trader_investment_plan": (None, "Trader"),
+    "final_trade_decision": (None, "Portfolio Manager"),
+    "investor_briefing": (None, "Investor Briefing"),
+}
+
+# Set form for O(1) membership tests at API boundaries.
+VALID_ANALYSTS = frozenset(ANALYST_ORDER)
+
 
 DEFAULT_CONFIG = {
     "project_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),

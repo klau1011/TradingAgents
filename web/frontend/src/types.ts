@@ -92,6 +92,15 @@ export interface ReportSummary {
   decision: string | null;
   path: string;
 }
+
+export interface PortfolioDecisionDetail {
+  rating: string;
+  executive_summary: string;
+  investment_thesis: string;
+  price_target: number | null;
+  time_horizon: string | null;
+}
+
 export interface ReportDetail {
   folder: string;
   ticker: string;
@@ -99,6 +108,7 @@ export interface ReportDetail {
   complete_report: string;
   sections: Record<string, Record<string, string>>;
   decision: string | null;
+  decision_detail: PortfolioDecisionDetail | null;
   path: string;
 }
 

@@ -12,9 +12,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, field_validator
 
+from tradingagents.default_config import ANALYST_ORDER, VALID_ANALYSTS
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
 
 from .reports import (
+    get_decision,
     get_report,
     list_reports,
 )
@@ -30,15 +32,13 @@ router = APIRouter()
 
 
 _TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
-_DEFAULT_ANALYSTS = ["market", "social", "news", "fundamentals"]
-_VALID_ANALYSTS = set(_DEFAULT_ANALYSTS)
 _VALID_PROVIDERS = set(MODEL_OPTIONS.keys()) | {"openrouter", "azure"}
 
 
 class StartRunRequest(BaseModel):
     ticker: str
     analysis_date: str
-    analysts: List[str] = Field(default_factory=lambda: list(_DEFAULT_ANALYSTS))
+    analysts: List[str] = Field(default_factory=lambda: list(ANALYST_ORDER))
     research_depth: int = 1
     llm_provider: str = "openai"
     backend_url: str = "https://api.openai.com/v1"
@@ -74,7 +74,7 @@ class StartRunRequest(BaseModel):
         v = [a.lower() for a in v]
         if not v:
             raise ValueError("Select at least one analyst")
-        bad = [a for a in v if a not in _VALID_ANALYSTS]
+        bad = [a for a in v if a not in VALID_ANALYSTS]
         if bad:
             raise ValueError(f"Unknown analysts: {bad}")
         return v
@@ -254,3 +254,17 @@ def report_detail(folder: str) -> Dict[str, Any]:
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return report
+
+
+@router.get("/api/reports/{folder}/decision")
+def report_decision(folder: str) -> Dict[str, Any]:
+    """Return the structured PortfolioDecision JSON for a report.
+
+    404s when the report has no ``decision.json`` (legacy runs predating the
+    structured-output persistence change). Frontend should fall back to the
+    rendered markdown in that case.
+    """
+    decision = get_decision(folder)
+    if decision is None:
+        raise HTTPException(status_code=404, detail="Structured decision not available")
+    return decision

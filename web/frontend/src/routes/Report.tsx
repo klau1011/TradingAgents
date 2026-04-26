@@ -20,6 +20,61 @@ const SUBFOLDER_TITLES: Record<string, string> = {
   "5_portfolio": "V. Portfolio Decision",
 };
 
+type DecisionDetail = {
+  rating: string;
+  executive_summary: string;
+  investment_thesis: string;
+  price_target: number | null;
+  time_horizon: string | null;
+};
+
+function normalizeDecisionDetail(detail: unknown): DecisionDetail | null {
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+
+  const candidate = detail as Record<string, unknown>;
+  if (
+    typeof candidate.rating !== "string" ||
+    !candidate.rating.trim() ||
+    typeof candidate.executive_summary !== "string" ||
+    !candidate.executive_summary.trim() ||
+    typeof candidate.investment_thesis !== "string" ||
+    !candidate.investment_thesis.trim()
+  ) {
+    return null;
+  }
+
+  const priceTarget = candidate.price_target;
+  if (
+    priceTarget !== null &&
+    priceTarget !== undefined &&
+    (typeof priceTarget !== "number" || Number.isNaN(priceTarget))
+  ) {
+    return null;
+  }
+
+  const timeHorizon = candidate.time_horizon;
+  if (
+    timeHorizon !== null &&
+    timeHorizon !== undefined &&
+    typeof timeHorizon !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    rating: candidate.rating.trim(),
+    executive_summary: candidate.executive_summary.trim(),
+    investment_thesis: candidate.investment_thesis.trim(),
+    price_target: typeof priceTarget === "number" ? priceTarget : null,
+    time_horizon:
+      typeof timeHorizon === "string" && timeHorizon.trim()
+        ? timeHorizon.trim()
+        : null,
+  };
+}
+
 export function ReportPage() {
   const { folder } = useParams<{ folder: string }>();
   const { data, isLoading, error } = useQuery({
@@ -73,6 +128,8 @@ export function ReportPage() {
       </div>
     );
 
+  const decisionDetail = normalizeDecisionDetail(data.decision_detail);
+
   return (
     <div className="space-y-0">
       <section className="bg-inverse text-inverse-fg px-32p py-80p">
@@ -90,11 +147,71 @@ export function ReportPage() {
               </Button>
             </Link>
           </div>
+          {decisionDetail &&
+            (decisionDetail.price_target !== null || decisionDetail.time_horizon) && (
+              <dl className="flex flex-wrap gap-4">
+                {decisionDetail.price_target !== null && (
+                  <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+                    <dt className="font-display text-nav text-inverse-fg/60">
+                      Price Target
+                    </dt>
+                    <dd className="font-display text-feature font-medium">
+                      {decisionDetail.price_target}
+                    </dd>
+                  </div>
+                )}
+                {decisionDetail.time_horizon && (
+                  <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+                    <dt className="font-display text-nav text-inverse-fg/60">
+                      Time Horizon
+                    </dt>
+                    <dd className="font-display text-feature font-medium">
+                      {decisionDetail.time_horizon}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+            )}
         </div>
       </section>
 
       <section className="bg-surface px-32p py-80p">
         <div className="mx-auto max-w-5xl space-y-32p">
+          {decisionDetail && (
+            <>
+              <Card>
+                <div className="space-y-2">
+                  <p className="font-display text-nav text-muted">
+                    Portfolio Manager — action plan
+                  </p>
+                  <h2 className="font-display text-card font-medium">
+                    Executive Summary
+                  </h2>
+                </div>
+                <article className="md-body mt-4">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {decisionDetail.executive_summary}
+                  </ReactMarkdown>
+                </article>
+              </Card>
+              <Card>
+                <div className="space-y-2">
+                  <p className="font-display text-nav text-muted">
+                    Portfolio Manager — reasoning
+                  </p>
+                  <h2 className="font-display text-card font-medium">
+                    Investment Thesis
+                  </h2>
+                </div>
+                <article className="md-body mt-4">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {decisionDetail.investment_thesis}
+                  </ReactMarkdown>
+                </article>
+              </Card>
+            </>
+          )}
+
           {data.briefing && (
             <Card>
               <div className="space-y-2">

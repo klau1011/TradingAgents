@@ -305,3 +305,40 @@ def test_runner_default_cancel_event_does_not_cancel(tmp_path: Path) -> None:
         assert runner.cancel_event is not None
         assert not runner.cancel_event.is_set()
         runner.run()  # no exception -> success
+
+
+def test_runner_activates_ohlcv_cache_during_streaming(tmp_path: Path) -> None:
+    """The per-run OHLCV cache must be active while the graph streams chunks.
+
+    Regression: previously the cache scope only wrapped
+    ``TradingAgentsGraph._run_graph``, but the web/CLI paths bypass that and
+    stream directly via ``graph.graph.stream``. Without an active cache,
+    duplicate yfinance fetches across analysts went undeduped.
+    """
+    from tradingagents.dataflows.ohlcv_cache import cache_get, cache_put
+
+    seen_active: list[bool] = []
+
+    class _CacheProbingInnerGraph(_StubInnerGraph):
+        def stream(self, init_state, **kwargs):
+            # Probe: writing then reading a key only round-trips when a cache
+            # context is active; otherwise ``cache_get`` returns ``None``.
+            cache_put(("probe",), "sentinel")
+            seen_active.append(cache_get(("probe",)) == "sentinel")
+            yield from super().stream(init_state, **kwargs)
+
+    class _StubGraphWithProbe(_StubGraph):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.graph = _CacheProbingInnerGraph(_FAKE_CHUNKS)
+
+    cfg = RunnerConfig(ticker="CACHE", analysis_date="2025-01-02", analysts=["market"])
+    with patch.object(runner_mod, "TradingAgentsGraph", _StubGraphWithProbe):
+        AnalysisRunner(config=cfg, save_dir=tmp_path).run()
+
+    assert seen_active == [True], (
+        "OHLCV cache was not active inside AnalysisRunner._stream; "
+        "yfinance dedup hooks would be no-ops on the web/CLI paths."
+    )
+    # And the cache must be torn down after the run (no leak across runs).
+    assert cache_get(("probe",)) is None

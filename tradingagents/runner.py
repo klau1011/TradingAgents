@@ -111,7 +111,7 @@ class RunnerConfig:
     llm_provider: str = "openai"
     backend_url: str = "https://api.openai.com/v1"
     shallow_thinker: str = "gpt-5.4-mini"
-    deep_thinker: str = "gpt-5.4"
+    deep_thinker: str = "gpt-5.5"
     output_language: str = "English"
     google_thinking_level: Optional[str] = None
     openai_reasoning_effort: Optional[str] = None

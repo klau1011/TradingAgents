@@ -45,7 +45,7 @@ export function NewRunPage() {
   ]);
   const [provider, setProvider] = useState("openai");
   const [shallow, setShallow] = useState("gpt-5.4-mini");
-  const [deep, setDeep] = useState("gpt-5.4");
+  const [deep, setDeep] = useState("gpt-5.5");
   const [depth, setDepth] = useState(1);
   const [language, setLanguage] = useState("English");
   // Provider-specific thinking depth. Mirrors the CLI's Step 8.

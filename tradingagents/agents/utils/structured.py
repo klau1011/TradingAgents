@@ -71,3 +71,31 @@ def invoke_structured_or_freetext(
 
     response = plain_llm.invoke(prompt)
     return response.content
+
+
+def invoke_structured_or_freetext_with_object(
+    structured_llm: Optional[Any],
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+) -> tuple[str, Optional[T]]:
+    """Same as :func:`invoke_structured_or_freetext` but also returns the typed object.
+
+    The object is ``None`` when the structured path was unavailable or
+    failed and the agent fell back to free-text generation. Callers that
+    need the structured fields (e.g. to persist as JSON) should branch on
+    ``None``.
+    """
+    if structured_llm is not None:
+        try:
+            result = structured_llm.invoke(prompt)
+            return render(result), result
+        except Exception as exc:
+            logger.warning(
+                "%s: structured-output invocation failed (%s); retrying once as free text",
+                agent_name, exc,
+            )
+
+    response = plain_llm.invoke(prompt)
+    return response.content, None

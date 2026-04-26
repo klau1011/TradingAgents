@@ -17,7 +17,7 @@ from tradingagents.agents.utils.agent_utils import (
 )
 from tradingagents.agents.utils.structured import (
     bind_structured,
-    invoke_structured_or_freetext,
+    invoke_structured_or_freetext_with_object,
 )
 
 
@@ -63,7 +63,7 @@ def create_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
 
-        final_trade_decision = invoke_structured_or_freetext(
+        final_trade_decision, decision_obj = invoke_structured_or_freetext_with_object(
             structured_llm,
             llm,
             prompt,
@@ -87,6 +87,7 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            "pm_decision": decision_obj.model_dump(mode="json") if decision_obj is not None else None,
         }
 
     return portfolio_manager_node

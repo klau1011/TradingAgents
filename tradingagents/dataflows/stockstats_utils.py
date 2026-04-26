@@ -8,6 +8,7 @@ from stockstats import wrap
 from typing import Annotated
 import os
 from .config import get_config
+from .ohlcv_cache import cache_get, cache_put
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,16 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     subsequent calls the cache is reused if less than 6 minutes old.
     Rows after curr_date are filtered out so backtests never see future
     prices.
+
+    When a per-run :func:`ohlcv_cache.start_run_cache` context is active,
+    the filtered DataFrame is also memoized in-process keyed by
+    ``(symbol, curr_date)`` so multiple analysts in one analysis avoid
+    re-reading the CSV cache and re-running pandas filtering.
     """
+    cached = cache_get(("ohlcv", symbol, curr_date))
+    if cached is not None:
+        return cached
+
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
 
@@ -98,6 +108,8 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
 
     # Filter to curr_date to prevent look-ahead bias in backtesting
     data = data[data["Date"] <= curr_date_dt]
+
+    cache_put(("ohlcv", symbol, curr_date), data)
 
     return data
 

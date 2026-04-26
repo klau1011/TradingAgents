@@ -5,6 +5,7 @@ import pandas as pd
 import yfinance as yf
 import os
 from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
+from .ohlcv_cache import cache_get, cache_put
 
 _VOLUME_WINDOW = 20
 _INDICATOR_ALIASES = {
@@ -88,6 +89,13 @@ def get_YFin_data_online(
     datetime.strptime(start_date, "%Y-%m-%d")
     datetime.strptime(end_date, "%Y-%m-%d")
 
+    # Per-run cache: identical (symbol, start, end) requests within one
+    # analysis run reuse the rendered CSV string. No-op outside a run.
+    cache_key = ("yfin_online", symbol.upper(), start_date, end_date)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     # Create ticker object
     ticker = yf.Ticker(symbol.upper())
 
@@ -122,7 +130,9 @@ def get_YFin_data_online(
     header += f"# Total records: {len(data)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
-    return header + csv_string
+    result = header + csv_string
+    cache_put(cache_key, result)
+    return result
 
 def get_stock_stats_indicators_window(
     symbol: Annotated[str, "ticker symbol of the company"],

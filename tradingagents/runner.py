@@ -30,7 +30,15 @@ class RunCancelled(Exception):
     """Raised inside the runner when an external cancel is requested."""
 
 
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import (
+    ANALYST_DISPLAY_NAMES,
+    ANALYST_ORDER,
+    ANALYST_REPORT_MAP,
+    DEFAULT_CONFIG,
+    FIXED_AGENTS,
+    REPORT_SECTIONS,
+)
+from tradingagents.dataflows.ohlcv_cache import start_run_cache
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.runner_events import (
     AgentStatusEvent,
@@ -42,51 +50,6 @@ from tradingagents.runner_events import (
     StatusEvent,
     ToolCallEvent,
 )
-
-
-# ---------------------------------------------------------------------------
-# Constants mirroring cli/main.py so behavior matches the existing CLI exactly.
-# ---------------------------------------------------------------------------
-
-ANALYST_ORDER: List[str] = ["market", "social", "news", "fundamentals"]
-
-ANALYST_AGENT_NAMES: Dict[str, str] = {
-    "market": "Market Analyst",
-    "social": "Social Analyst",
-    "news": "News Analyst",
-    "fundamentals": "Fundamentals Analyst",
-}
-
-ANALYST_REPORT_MAP: Dict[str, str] = {
-    "market": "market_report",
-    "social": "sentiment_report",
-    "news": "news_report",
-    "fundamentals": "fundamentals_report",
-}
-
-FIXED_AGENTS: Dict[str, List[str]] = {
-    "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
-    "Trading Team": ["Trader"],
-    "Risk Management": [
-        "Aggressive Analyst",
-        "Neutral Analyst",
-        "Conservative Analyst",
-    ],
-    "Portfolio Management": ["Portfolio Manager"],
-    "Investor Briefing": ["Investor Briefing"],
-}
-
-# section -> (analyst_key controlling the section, finalizing agent name)
-REPORT_SECTIONS: Dict[str, tuple] = {
-    "market_report": ("market", "Market Analyst"),
-    "sentiment_report": ("social", "Social Analyst"),
-    "news_report": ("news", "News Analyst"),
-    "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
-    "investment_plan": (None, "Research Manager"),
-    "trader_investment_plan": (None, "Trader"),
-    "final_trade_decision": (None, "Portfolio Manager"),
-    "investor_briefing": (None, "Investor Briefing"),
-}
 
 
 EventCallback = Callable[[RunEvent], None]
@@ -210,8 +173,8 @@ class AnalysisRunner:
         self._processed_message_ids: set = set()
 
         for key in self._selected_analysts:
-            if key in ANALYST_AGENT_NAMES:
-                self._agent_status[ANALYST_AGENT_NAMES[key]] = "pending"
+            if key in ANALYST_DISPLAY_NAMES:
+                self._agent_status[ANALYST_DISPLAY_NAMES[key]] = "pending"
         for agents in FIXED_AGENTS.values():
             for agent in agents:
                 self._agent_status[agent] = "pending"
@@ -256,7 +219,7 @@ class AnalysisRunner:
 
             # Mark first analyst in_progress immediately for snappy UI
             if self._selected_analysts:
-                first = ANALYST_AGENT_NAMES[self._selected_analysts[0]]
+                first = ANALYST_DISPLAY_NAMES[self._selected_analysts[0]]
                 self._set_agent_status(first, "in_progress")
 
             init_state = graph.propagator.create_initial_state(
@@ -312,14 +275,18 @@ class AnalysisRunner:
     # ------------------------------------------------------------------
 
     def _stream(self, graph, init_state, args) -> Dict[str, Any]:
-        trace = []
-        for chunk in graph.graph.stream(init_state, **args):
-            if self.cancel_event.is_set():
-                raise RunCancelled("Run cancelled by user")
-            self._process_chunk(chunk)
-            trace.append(chunk)
-        if not trace:
-            raise RuntimeError("Graph produced no output chunks")
+        # Per-run OHLCV cache: dedupes yfinance fetches across analysts within
+        # this run. Required here because the web/CLI paths bypass
+        # ``TradingAgentsGraph._run_graph`` (which has its own cache scope).
+        with start_run_cache():
+            trace = []
+            for chunk in graph.graph.stream(init_state, **args):
+                if self.cancel_event.is_set():
+                    raise RunCancelled("Run cancelled by user")
+                self._process_chunk(chunk)
+                trace.append(chunk)
+            if not trace:
+                raise RuntimeError("Graph produced no output chunks")
         return trace[-1]
 
     def _process_chunk(self, chunk: Dict[str, Any]) -> None:
@@ -428,7 +395,7 @@ class AnalysisRunner:
         for analyst_key in ANALYST_ORDER:
             if analyst_key not in self._selected_analysts:
                 continue
-            agent_name = ANALYST_AGENT_NAMES[analyst_key]
+            agent_name = ANALYST_DISPLAY_NAMES[analyst_key]
             report_key = ANALYST_REPORT_MAP[analyst_key]
 
             if chunk.get(report_key):
@@ -661,6 +628,13 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
             (portfolio_dir / "decision.md").write_text(
                 risk["judge_decision"], encoding="utf-8"
             )
+            pm_decision = final_state.get("pm_decision")
+            if pm_decision is not None:
+                import json as _json
+                (portfolio_dir / "decision.json").write_text(
+                    _json.dumps(pm_decision, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
             sections.append(
                 "## V. Portfolio Manager Decision\n\n### Portfolio Manager\n"
                 + risk["judge_decision"]

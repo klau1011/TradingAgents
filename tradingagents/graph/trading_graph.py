@@ -24,6 +24,7 @@ from tradingagents.agents.utils.agent_states import (
     RiskDebateState,
 )
 from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.ohlcv_cache import start_run_cache
 
 # Import the new abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
@@ -318,50 +319,52 @@ class TradingAgentsGraph:
 
     def _run_graph(self, company_name, trade_date):
         """Execute the graph and write the resulting state to disk and memory log."""
-        # Initialize state — inject memory log context for PM.
-        past_context = self.memory_log.get_past_context(company_name)
-        init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, past_context=past_context
-        )
-        args = self.propagator.get_graph_args()
+        # Per-run OHLCV cache: dedupes yfinance fetches across analysts.
+        with start_run_cache():
+            # Initialize state — inject memory log context for PM.
+            past_context = self.memory_log.get_past_context(company_name)
+            init_agent_state = self.propagator.create_initial_state(
+                company_name, trade_date, past_context=past_context
+            )
+            args = self.propagator.get_graph_args()
 
-        # Inject thread_id so same ticker+date resumes, different date starts fresh.
-        if self.config.get("checkpoint_enabled"):
-            tid = thread_id(company_name, str(trade_date))
-            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+            # Inject thread_id so same ticker+date resumes, different date starts fresh.
+            if self.config.get("checkpoint_enabled"):
+                tid = thread_id(company_name, str(trade_date))
+                args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
-        if self.debug:
-            trace = []
-            for chunk in self.graph.stream(init_agent_state, **args):
-                if len(chunk["messages"]) == 0:
-                    pass
-                else:
-                    chunk["messages"][-1].pretty_print()
-                    trace.append(chunk)
-            final_state = trace[-1]
-        else:
-            final_state = self.graph.invoke(init_agent_state, **args)
+            if self.debug:
+                trace = []
+                for chunk in self.graph.stream(init_agent_state, **args):
+                    if len(chunk["messages"]) == 0:
+                        pass
+                    else:
+                        chunk["messages"][-1].pretty_print()
+                        trace.append(chunk)
+                final_state = trace[-1]
+            else:
+                final_state = self.graph.invoke(init_agent_state, **args)
 
-        # Store current state for reflection.
-        self.curr_state = final_state
+            # Store current state for reflection.
+            self.curr_state = final_state
 
-        # Log state to disk.
-        self._log_state(trade_date, final_state)
+            # Log state to disk.
+            self._log_state(trade_date, final_state)
 
-        # Store decision for deferred reflection on the next same-ticker run.
-        self.memory_log.store_decision(
-            ticker=company_name,
-            trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
-        )
-
-        # Clear checkpoint on successful completion to avoid stale state.
-        if self.config.get("checkpoint_enabled"):
-            clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date)
+            # Store decision for deferred reflection on the next same-ticker run.
+            self.memory_log.store_decision(
+                ticker=company_name,
+                trade_date=trade_date,
+                final_trade_decision=final_state["final_trade_decision"],
             )
 
-        return final_state, self.process_signal(final_state["final_trade_decision"])
+            # Clear checkpoint on successful completion to avoid stale state.
+            if self.config.get("checkpoint_enabled"):
+                clear_checkpoint(
+                    self.config["data_cache_dir"], company_name, str(trade_date)
+                )
+
+            return final_state, self.process_signal(final_state["final_trade_decision"])
 
     def _log_state(self, trade_date, final_state):
         """Log the final state to a JSON file."""

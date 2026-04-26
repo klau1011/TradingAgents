@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import os
 import re
@@ -99,18 +100,87 @@ _RATING_LINE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_REQUIRED_DECISION_FIELDS = (
+    "rating",
+    "executive_summary",
+    "investment_thesis",
+)
+
+
+def _load_validated_decision_json(decision_json: Path) -> Optional[Dict[str, Any]]:
+    """Load and validate decision.json, returning a normalized dict or None."""
+    if not decision_json.exists():
+        return None
+
+    try:
+        payload = json.loads(decision_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not parse %s: %s", decision_json, exc)
+        return None
+
+    if not isinstance(payload, dict):
+        logger.warning(
+            "Ignoring malformed %s: expected JSON object, got %s",
+            decision_json,
+            type(payload).__name__,
+        )
+        return None
+
+    normalized: Dict[str, Any] = {}
+    for field in _REQUIRED_DECISION_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            logger.warning(
+                "Ignoring malformed %s: missing/invalid '%s'",
+                decision_json,
+                field,
+            )
+            return None
+        normalized[field] = value.strip()
+
+    price_target = payload.get("price_target")
+    if price_target is not None and (
+        isinstance(price_target, bool) or not isinstance(price_target, (int, float))
+    ):
+        logger.warning(
+            "Ignoring malformed %s: invalid 'price_target' type %s",
+            decision_json,
+            type(price_target).__name__,
+        )
+        return None
+    normalized["price_target"] = price_target
+
+    time_horizon = payload.get("time_horizon")
+    if time_horizon is not None and not isinstance(time_horizon, str):
+        logger.warning(
+            "Ignoring malformed %s: invalid 'time_horizon' type %s",
+            decision_json,
+            type(time_horizon).__name__,
+        )
+        return None
+    normalized["time_horizon"] = time_horizon.strip() if isinstance(time_horizon, str) else None
+
+    return normalized
+
 
 def _peek_decision(folder: Path) -> Optional[str]:
     """Best-effort: extract a BUY/HOLD/SELL-style label from the portfolio file.
 
-    Prefer the explicit ``**Rating**: **X**`` line written at the top of the
-    Portfolio Manager's decision; only fall back to keyword scanning if that
-    line is absent. A document-wide priority scan is unsafe because the
-    narrative often discusses other ratings (e.g. a Sell decision saying
-    "Hold is too passive"), which would cause the badge to disagree with the
-    actual decision.
+    Prefers the structured ``decision.json`` written by the Portfolio Manager
+    (typed, no parsing required). Falls back to scanning the explicit
+    ``**Rating**: **X**`` line in ``decision.md`` for legacy reports, then to
+    a first-line keyword scan as a final safety net. A document-wide priority
+    scan is unsafe because the narrative often discusses other ratings (e.g.
+    a Sell decision saying "Hold is too passive"), which would cause the badge
+    to disagree with the actual decision.
     """
-    decision_file = folder / "5_portfolio" / "decision.md"
+    portfolio_dir = folder / "5_portfolio"
+    decision_json = portfolio_dir / "decision.json"
+    decision_obj = _load_validated_decision_json(decision_json)
+    if decision_obj is not None:
+        return decision_obj["rating"].upper()
+
+    decision_file = portfolio_dir / "decision.md"
     if not decision_file.exists():
         return None
     try:
@@ -129,6 +199,28 @@ def _peek_decision(folder: Path) -> Optional[str]:
                 return keyword
         break
     return None
+
+
+def _load_full_decision(folder: Path) -> Optional[Dict[str, Any]]:
+    """Return the parsed ``decision.json`` dict for the run, or ``None``.
+
+    The dict shape mirrors ``tradingagents.agents.schemas.PortfolioDecision``:
+    ``rating``, ``executive_summary``, ``investment_thesis``, optional
+    ``price_target`` and ``time_horizon``.
+    """
+    decision_json = folder / "5_portfolio" / "decision.json"
+    return _load_validated_decision_json(decision_json)
+
+
+def get_decision(folder: str) -> Optional[Dict[str, Any]]:
+    """Public accessor used by the API to serve the structured PM decision."""
+    safe = _safe_folder(folder)
+    if safe is None:
+        return None
+    candidate = _resolve_folder(safe, require_complete=True)
+    if candidate is None:
+        return None
+    return _load_full_decision(candidate)
 
 
 def _safe_read(path: Path) -> str:
@@ -197,6 +289,7 @@ def get_report(folder: str) -> Optional[Dict[str, Any]]:
         "complete_report": _safe_read(complete),
         "sections": sections,
         "decision": _peek_decision(candidate),
+        "decision_detail": _load_full_decision(candidate),
         "path": str(candidate),
     }
 

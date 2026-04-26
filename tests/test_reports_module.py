@@ -109,3 +109,130 @@ def test_get_report_returns_none_for_incomplete(fake_reports_root: Path) -> None
     incomplete.mkdir()
     (incomplete / "1_analysts").mkdir()
     assert reports_mod.get_report("INC_20260105_120000") is None
+
+
+def test_decision_json_overrides_markdown_for_peek(fake_reports_root: Path) -> None:
+    folder = fake_reports_root / "JSN_20260108_120000"
+    _write_complete(folder, decision_text='**Rating**: **Hold**\n')
+    import json as _json
+    (folder / "5_portfolio" / "decision.json").write_text(
+        _json.dumps({
+            "rating": "Sell",
+            "executive_summary": "exit",
+            "investment_thesis": "thesis",
+            "price_target": 12.5,
+            "time_horizon": "3-6 months",
+        }),
+        encoding="utf-8",
+    )
+
+    listed = reports_mod.list_reports()
+    by_folder = {r["folder"]: r for r in listed}
+    # JSON wins over the markdown rating line.
+    assert by_folder["JSN_20260108_120000"]["decision"] == "SELL"
+
+
+def test_get_decision_returns_full_dict(fake_reports_root: Path) -> None:
+    folder = fake_reports_root / "FUL_20260109_120000"
+    _write_complete(folder)
+    import json as _json
+    payload = {
+        "rating": "Buy",
+        "executive_summary": "summary",
+        "investment_thesis": "thesis",
+        "price_target": None,
+        "time_horizon": None,
+    }
+    (folder / "5_portfolio" / "decision.json").write_text(
+        _json.dumps(payload), encoding="utf-8"
+    )
+
+    got = reports_mod.get_decision("FUL_20260109_120000")
+    assert got == payload
+
+
+def test_get_decision_returns_none_when_missing(fake_reports_root: Path) -> None:
+    folder = fake_reports_root / "NOJ_20260110_120000"
+    _write_complete(folder)
+    assert reports_mod.get_decision("NOJ_20260110_120000") is None
+
+
+def test_get_report_includes_decision_detail(fake_reports_root: Path) -> None:
+    folder = fake_reports_root / "DET_20260111_120000"
+    _write_complete(folder)
+    import json as _json
+    payload = {
+        "rating": "Overweight",
+        "executive_summary": "s",
+        "investment_thesis": "t",
+        "price_target": 99.0,
+        "time_horizon": "1y",
+    }
+    (folder / "5_portfolio" / "decision.json").write_text(
+        _json.dumps(payload), encoding="utf-8"
+    )
+    report = reports_mod.get_report("DET_20260111_120000")
+    assert report is not None
+    assert report["decision_detail"] == payload
+    assert report["decision"] == "OVERWEIGHT"
+
+
+def test_get_decision_rejects_incomplete_shape(fake_reports_root: Path) -> None:
+    folder = fake_reports_root / "BAD_20260112_120000"
+    _write_complete(folder)
+    import json as _json
+    payload = {
+        "rating": "Buy",
+        "executive_summary": "summary",
+        # Missing required field: investment_thesis
+    }
+    (folder / "5_portfolio" / "decision.json").write_text(
+        _json.dumps(payload), encoding="utf-8"
+    )
+
+    assert reports_mod.get_decision("BAD_20260112_120000") is None
+
+
+def test_get_report_drops_invalid_decision_detail_and_falls_back_to_markdown_rating(
+    fake_reports_root: Path,
+) -> None:
+    folder = fake_reports_root / "MAL_20260113_120000"
+    _write_complete(folder, decision_text="**Rating**: **Hold**\n")
+    import json as _json
+    payload = {
+        "rating": "Sell",
+        "executive_summary": "summary",
+        "investment_thesis": "thesis",
+        "price_target": "not-a-number",
+    }
+    (folder / "5_portfolio" / "decision.json").write_text(
+        _json.dumps(payload), encoding="utf-8"
+    )
+
+    report = reports_mod.get_report("MAL_20260113_120000")
+    assert report is not None
+    assert report["decision_detail"] is None
+    # When decision.json is invalid, the markdown rating is used as fallback.
+    assert report["decision"] == "HOLD"
+
+
+def test_get_decision_normalizes_missing_optional_fields(fake_reports_root: Path) -> None:
+    folder = fake_reports_root / "NOR_20260114_120000"
+    _write_complete(folder)
+    import json as _json
+    payload = {
+        "rating": "Buy",
+        "executive_summary": "summary",
+        "investment_thesis": "thesis",
+    }
+    (folder / "5_portfolio" / "decision.json").write_text(
+        _json.dumps(payload), encoding="utf-8"
+    )
+
+    got = reports_mod.get_decision("NOR_20260114_120000")
+    assert got is not None
+    assert got["rating"] == "Buy"
+    assert got["executive_summary"] == "summary"
+    assert got["investment_thesis"] == "thesis"
+    assert got["price_target"] is None
+    assert got["time_horizon"] is None

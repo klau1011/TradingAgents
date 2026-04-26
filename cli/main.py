@@ -24,8 +24,16 @@ from rich import box
 from rich.align import Align
 from rich.rule import Rule
 
+from tradingagents.dataflows.ohlcv_cache import start_run_cache
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.default_config import (
+    ANALYST_DISPLAY_NAMES,
+    ANALYST_ORDER,
+    ANALYST_REPORT_MAP,
+    DEFAULT_CONFIG,
+    FIXED_AGENTS,
+    REPORT_SECTIONS,
+)
 from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
@@ -42,37 +50,6 @@ app = typer.Typer(
 
 # Create a deque to store recent messages with a maximum length
 class MessageBuffer:
-    # Fixed teams that always run (not user-selectable)
-    FIXED_AGENTS = {
-        "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
-        "Trading Team": ["Trader"],
-        "Risk Management": ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"],
-        "Portfolio Management": ["Portfolio Manager"],
-        "Investor Briefing": ["Investor Briefing"],
-    }
-
-    # Analyst name mapping
-    ANALYST_MAPPING = {
-        "market": "Market Analyst",
-        "social": "Social Analyst",
-        "news": "News Analyst",
-        "fundamentals": "Fundamentals Analyst",
-    }
-
-    # Report section mapping: section -> (analyst_key for filtering, finalizing_agent)
-    # analyst_key: which analyst selection controls this section (None = always included)
-    # finalizing_agent: which agent must be "completed" for this report to count as done
-    REPORT_SECTIONS = {
-        "market_report": ("market", "Market Analyst"),
-        "sentiment_report": ("social", "Social Analyst"),
-        "news_report": ("news", "News Analyst"),
-        "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
-        "investment_plan": (None, "Research Manager"),
-        "trader_investment_plan": (None, "Trader"),
-        "final_trade_decision": (None, "Portfolio Manager"),
-        "investor_briefing": (None, "Investor Briefing"),
-    }
-
     def __init__(self, max_length=100):
         self.messages = deque(maxlen=max_length)
         self.tool_calls = deque(maxlen=max_length)
@@ -97,17 +74,17 @@ class MessageBuffer:
 
         # Add selected analysts
         for analyst_key in self.selected_analysts:
-            if analyst_key in self.ANALYST_MAPPING:
-                self.agent_status[self.ANALYST_MAPPING[analyst_key]] = "pending"
+            if analyst_key in ANALYST_DISPLAY_NAMES:
+                self.agent_status[ANALYST_DISPLAY_NAMES[analyst_key]] = "pending"
 
         # Add fixed teams
-        for team_agents in self.FIXED_AGENTS.values():
+        for team_agents in FIXED_AGENTS.values():
             for agent in team_agents:
                 self.agent_status[agent] = "pending"
 
         # Build report_sections dynamically
         self.report_sections = {}
-        for section, (analyst_key, _) in self.REPORT_SECTIONS.items():
+        for section, (analyst_key, _) in REPORT_SECTIONS.items():
             if analyst_key is None or analyst_key in self.selected_analysts:
                 self.report_sections[section] = None
 
@@ -130,9 +107,9 @@ class MessageBuffer:
         """
         count = 0
         for section in self.report_sections:
-            if section not in self.REPORT_SECTIONS:
+            if section not in REPORT_SECTIONS:
                 continue
-            _, finalizing_agent = self.REPORT_SECTIONS[section]
+            _, finalizing_agent = REPORT_SECTIONS[section]
             # Report is complete if it has content AND its finalizing agent is done
             has_content = self.report_sections.get(section) is not None
             agent_done = self.agent_status.get(finalizing_agent) == "completed"
@@ -726,6 +703,13 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
             portfolio_dir = save_path / "5_portfolio"
             portfolio_dir.mkdir(exist_ok=True)
             (portfolio_dir / "decision.md").write_text(risk["judge_decision"], encoding="utf-8")
+            pm_decision = final_state.get("pm_decision")
+            if pm_decision is not None:
+                import json as _json
+                (portfolio_dir / "decision.json").write_text(
+                    _json.dumps(pm_decision, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
             sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
 
     # Write consolidated report
@@ -802,22 +786,6 @@ def update_research_team_status(status):
         message_buffer.update_agent_status(agent, status)
 
 
-# Ordered list of analysts for status transitions
-ANALYST_ORDER = ["market", "social", "news", "fundamentals"]
-ANALYST_AGENT_NAMES = {
-    "market": "Market Analyst",
-    "social": "Social Analyst",
-    "news": "News Analyst",
-    "fundamentals": "Fundamentals Analyst",
-}
-ANALYST_REPORT_MAP = {
-    "market": "market_report",
-    "social": "sentiment_report",
-    "news": "news_report",
-    "fundamentals": "fundamentals_report",
-}
-
-
 def update_analyst_statuses(message_buffer, chunk):
     """Update analyst statuses based on accumulated report state.
 
@@ -836,7 +804,7 @@ def update_analyst_statuses(message_buffer, chunk):
         if analyst_key not in selected:
             continue
 
-        agent_name = ANALYST_AGENT_NAMES[analyst_key]
+        agent_name = ANALYST_DISPLAY_NAMES[analyst_key]
         report_key = ANALYST_REPORT_MAP[analyst_key]
 
         # Capture new report content from current chunk
@@ -1059,106 +1027,108 @@ def run_analysis(checkpoint: bool = False):
         # (LLM tracking is handled separately via LLM constructor)
         args = graph.propagator.get_graph_args(callbacks=[stats_handler])
 
-        # Stream the analysis
-        trace = []
-        for chunk in graph.graph.stream(init_agent_state, **args):
-            # Process all messages in chunk, deduplicating by message ID
-            for message in chunk.get("messages", []):
-                msg_id = getattr(message, "id", None)
-                if msg_id is not None:
-                    if msg_id in message_buffer._processed_message_ids:
-                        continue
-                    message_buffer._processed_message_ids.add(msg_id)
+        # Stream the analysis. Activate per-run OHLCV cache so duplicate
+        # yfinance fetches across analysts in this run are deduped.
+        with start_run_cache():
+            trace = []
+            for chunk in graph.graph.stream(init_agent_state, **args):
+                # Process all messages in chunk, deduplicating by message ID
+                for message in chunk.get("messages", []):
+                    msg_id = getattr(message, "id", None)
+                    if msg_id is not None:
+                        if msg_id in message_buffer._processed_message_ids:
+                            continue
+                        message_buffer._processed_message_ids.add(msg_id)
 
-                msg_type, content = classify_message_type(message)
-                if content and content.strip():
-                    message_buffer.add_message(msg_type, content)
+                    msg_type, content = classify_message_type(message)
+                    if content and content.strip():
+                        message_buffer.add_message(msg_type, content)
 
-                if hasattr(message, "tool_calls") and message.tool_calls:
-                    for tool_call in message.tool_calls:
-                        if isinstance(tool_call, dict):
-                            message_buffer.add_tool_call(tool_call["name"], tool_call["args"])
-                        else:
-                            message_buffer.add_tool_call(tool_call.name, tool_call.args)
+                    if hasattr(message, "tool_calls") and message.tool_calls:
+                        for tool_call in message.tool_calls:
+                            if isinstance(tool_call, dict):
+                                message_buffer.add_tool_call(tool_call["name"], tool_call["args"])
+                            else:
+                                message_buffer.add_tool_call(tool_call.name, tool_call.args)
 
-            # Update analyst statuses based on report state (runs on every chunk)
-            update_analyst_statuses(message_buffer, chunk)
+                # Update analyst statuses based on report state (runs on every chunk)
+                update_analyst_statuses(message_buffer, chunk)
 
-            # Research Team - Handle Investment Debate State
-            if chunk.get("investment_debate_state"):
-                debate_state = chunk["investment_debate_state"]
-                bull_hist = debate_state.get("bull_history", "").strip()
-                bear_hist = debate_state.get("bear_history", "").strip()
-                judge = debate_state.get("judge_decision", "").strip()
+                # Research Team - Handle Investment Debate State
+                if chunk.get("investment_debate_state"):
+                    debate_state = chunk["investment_debate_state"]
+                    bull_hist = debate_state.get("bull_history", "").strip()
+                    bear_hist = debate_state.get("bear_history", "").strip()
+                    judge = debate_state.get("judge_decision", "").strip()
 
-                # Only update status when there's actual content
-                if bull_hist or bear_hist:
-                    update_research_team_status("in_progress")
-                if bull_hist:
-                    message_buffer.update_report_section(
-                        "investment_plan", f"### Bull Researcher Analysis\n{bull_hist}"
-                    )
-                if bear_hist:
-                    message_buffer.update_report_section(
-                        "investment_plan", f"### Bear Researcher Analysis\n{bear_hist}"
-                    )
-                if judge:
-                    message_buffer.update_report_section(
-                        "investment_plan", f"### Research Manager Decision\n{judge}"
-                    )
-                    update_research_team_status("completed")
-                    message_buffer.update_agent_status("Trader", "in_progress")
-
-            # Trading Team
-            if chunk.get("trader_investment_plan"):
-                message_buffer.update_report_section(
-                    "trader_investment_plan", chunk["trader_investment_plan"]
-                )
-                if message_buffer.agent_status.get("Trader") != "completed":
-                    message_buffer.update_agent_status("Trader", "completed")
-                    message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
-
-            # Risk Management Team - Handle Risk Debate State
-            if chunk.get("risk_debate_state"):
-                risk_state = chunk["risk_debate_state"]
-                agg_hist = risk_state.get("aggressive_history", "").strip()
-                con_hist = risk_state.get("conservative_history", "").strip()
-                neu_hist = risk_state.get("neutral_history", "").strip()
-                judge = risk_state.get("judge_decision", "").strip()
-
-                if agg_hist:
-                    if message_buffer.agent_status.get("Aggressive Analyst") != "completed":
-                        message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
-                    message_buffer.update_report_section(
-                        "final_trade_decision", f"### Aggressive Analyst Analysis\n{agg_hist}"
-                    )
-                if con_hist:
-                    if message_buffer.agent_status.get("Conservative Analyst") != "completed":
-                        message_buffer.update_agent_status("Conservative Analyst", "in_progress")
-                    message_buffer.update_report_section(
-                        "final_trade_decision", f"### Conservative Analyst Analysis\n{con_hist}"
-                    )
-                if neu_hist:
-                    if message_buffer.agent_status.get("Neutral Analyst") != "completed":
-                        message_buffer.update_agent_status("Neutral Analyst", "in_progress")
-                    message_buffer.update_report_section(
-                        "final_trade_decision", f"### Neutral Analyst Analysis\n{neu_hist}"
-                    )
-                if judge:
-                    if message_buffer.agent_status.get("Portfolio Manager") != "completed":
-                        message_buffer.update_agent_status("Portfolio Manager", "in_progress")
+                    # Only update status when there's actual content
+                    if bull_hist or bear_hist:
+                        update_research_team_status("in_progress")
+                    if bull_hist:
                         message_buffer.update_report_section(
-                            "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
+                            "investment_plan", f"### Bull Researcher Analysis\n{bull_hist}"
                         )
-                        message_buffer.update_agent_status("Aggressive Analyst", "completed")
-                        message_buffer.update_agent_status("Conservative Analyst", "completed")
-                        message_buffer.update_agent_status("Neutral Analyst", "completed")
-                        message_buffer.update_agent_status("Portfolio Manager", "completed")
+                    if bear_hist:
+                        message_buffer.update_report_section(
+                            "investment_plan", f"### Bear Researcher Analysis\n{bear_hist}"
+                        )
+                    if judge:
+                        message_buffer.update_report_section(
+                            "investment_plan", f"### Research Manager Decision\n{judge}"
+                        )
+                        update_research_team_status("completed")
+                        message_buffer.update_agent_status("Trader", "in_progress")
 
-            # Update the display
-            update_display(layout, stats_handler=stats_handler, start_time=start_time)
+                # Trading Team
+                if chunk.get("trader_investment_plan"):
+                    message_buffer.update_report_section(
+                        "trader_investment_plan", chunk["trader_investment_plan"]
+                    )
+                    if message_buffer.agent_status.get("Trader") != "completed":
+                        message_buffer.update_agent_status("Trader", "completed")
+                        message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
 
-            trace.append(chunk)
+                # Risk Management Team - Handle Risk Debate State
+                if chunk.get("risk_debate_state"):
+                    risk_state = chunk["risk_debate_state"]
+                    agg_hist = risk_state.get("aggressive_history", "").strip()
+                    con_hist = risk_state.get("conservative_history", "").strip()
+                    neu_hist = risk_state.get("neutral_history", "").strip()
+                    judge = risk_state.get("judge_decision", "").strip()
+
+                    if agg_hist:
+                        if message_buffer.agent_status.get("Aggressive Analyst") != "completed":
+                            message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
+                        message_buffer.update_report_section(
+                            "final_trade_decision", f"### Aggressive Analyst Analysis\n{agg_hist}"
+                        )
+                    if con_hist:
+                        if message_buffer.agent_status.get("Conservative Analyst") != "completed":
+                            message_buffer.update_agent_status("Conservative Analyst", "in_progress")
+                        message_buffer.update_report_section(
+                            "final_trade_decision", f"### Conservative Analyst Analysis\n{con_hist}"
+                        )
+                    if neu_hist:
+                        if message_buffer.agent_status.get("Neutral Analyst") != "completed":
+                            message_buffer.update_agent_status("Neutral Analyst", "in_progress")
+                        message_buffer.update_report_section(
+                            "final_trade_decision", f"### Neutral Analyst Analysis\n{neu_hist}"
+                        )
+                    if judge:
+                        if message_buffer.agent_status.get("Portfolio Manager") != "completed":
+                            message_buffer.update_agent_status("Portfolio Manager", "in_progress")
+                            message_buffer.update_report_section(
+                                "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
+                            )
+                            message_buffer.update_agent_status("Aggressive Analyst", "completed")
+                            message_buffer.update_agent_status("Conservative Analyst", "completed")
+                            message_buffer.update_agent_status("Neutral Analyst", "completed")
+                            message_buffer.update_agent_status("Portfolio Manager", "completed")
+
+                # Update the display
+                update_display(layout, stats_handler=stats_handler, start_time=start_time)
+
+                trace.append(chunk)
 
         # Get final state and decision
         final_state = trace[-1]

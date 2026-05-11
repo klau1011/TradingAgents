@@ -545,7 +545,7 @@ def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Pat
         (analysts_dir / "sentiment.md").write_text(
             final_state["sentiment_report"], encoding="utf-8"
         )
-        analyst_parts.append(("Social Analyst", final_state["sentiment_report"]))
+        analyst_parts.append(("Sentiment Analyst", final_state["sentiment_report"]))
     if final_state.get("news_report"):
         analysts_dir.mkdir(exist_ok=True)
         (analysts_dir / "news.md").write_text(

@@ -9,6 +9,7 @@ from typing import Annotated
 import os
 from .config import get_config
 from .ohlcv_cache import cache_get, cache_put
+from .utils import safe_ticker_component
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,10 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     if cached is not None:
         return cached
 
+    # Reject ticker values that would escape the cache directory when
+    # interpolated into the cache filename (e.g. ``../../tmp/x``).
+    safe_symbol = safe_ticker_component(symbol)
+
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
 
@@ -77,7 +82,7 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     os.makedirs(config["data_cache_dir"], exist_ok=True)
     data_file = os.path.join(
         config["data_cache_dir"],
-        f"{symbol}-YFin-data.csv",
+        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
     )
 
     use_cache = False

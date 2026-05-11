@@ -106,7 +106,7 @@ def test_runner_emits_expected_event_sequence(tmp_path: Path) -> None:
     for e in events:
         if isinstance(e, AgentStatusEvent):
             final_status[e.agent] = e.status
-    for agent in ("Market Analyst", "Social Analyst", "News Analyst", "Fundamentals Analyst",
+    for agent in ("Market Analyst", "Sentiment Analyst", "News Analyst", "Fundamentals Analyst",
                   "Bull Researcher", "Bear Researcher", "Research Manager",
                   "Trader",
                   "Aggressive Analyst", "Conservative Analyst", "Neutral Analyst",

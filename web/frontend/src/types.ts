@@ -120,4 +120,5 @@ export const SECTION_LABELS: Record<string, string> = {
   investment_plan: "Research Decision",
   trader_investment_plan: "Trading Plan",
   final_trade_decision: "Portfolio Decision",
+  investor_briefing: "Investor Briefing",
 };

@@ -75,6 +75,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS": "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED": "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER": "benchmark_ticker",
+    "TRADINGAGENTS_TEMPERATURE": "temperature",
 }
 
 
@@ -122,6 +123,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
+    # Sampling temperature, forwarded to every provider when set. None leaves
+    # each provider at its own default. Lower values reduce run-to-run
+    # variation on models that honor it; reasoning models largely ignore it
+    # and no setting makes LLM output bit-identical across runs (see README).
+    "temperature": None,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
@@ -132,6 +138,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    "analyst_concurrency_limit": 1,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.
@@ -174,6 +181,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
         ".L": "^FTSE",     # London (FTSE 100)
         ".TO": "^GSPTSE",  # Toronto (TSX Composite)
         ".AX": "^AXJO",    # Australia (ASX 200)
+        ".SS": "000001.SS",  # Shanghai (SSE Composite)
+        ".SZ": "399001.SZ",  # Shenzhen (SZSE Component)
         "": "SPY",         # default for US-listed tickers (no suffix)
     },
 })

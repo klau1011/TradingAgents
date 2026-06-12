@@ -10,6 +10,7 @@ import os
 from .config import get_config
 from .ohlcv_cache import cache_get, cache_put
 from .utils import safe_ticker_component
+from .symbol_utils import normalize_symbol, NoMarketDataError
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +34,24 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 raise
 
 
+def _ensure_date_column(data: pd.DataFrame) -> pd.DataFrame:
+    """Normalize the date column to ``Date``.
+
+    Some yfinance builds leave the index unnamed (so ``reset_index()`` yields
+    ``index``) or use ``Datetime`` for intraday data. Rename the first
+    date-like column so indicators don't silently drop when it isn't ``Date``.
+    """
+    if "Date" in data.columns:
+        return data
+    for candidate in ("index", "Datetime", "date"):
+        if candidate in data.columns:
+            return data.rename(columns={candidate: "Date"})
+    return data
+
+
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
+    data = _ensure_date_column(data)
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
 
@@ -62,13 +79,16 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     ``(symbol, curr_date)`` so multiple analysts in one analysis avoid
     re-reading the CSV cache and re-running pandas filtering.
     """
-    cached = cache_get(("ohlcv", symbol, curr_date))
+    canonical = normalize_symbol(symbol)
+    cache_key = ("ohlcv", canonical, curr_date)
+    cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
-    # Reject ticker values that would escape the cache directory when
+    # Resolve broker/forex symbols (XAUUSD+ -> GC=F) to Yahoo's convention,
+    # then reject values that would escape the cache directory when
     # interpolated into the cache filename (e.g. ``../../tmp/x``).
-    safe_symbol = safe_ticker_component(symbol)
+    safe_symbol = safe_ticker_component(canonical)
 
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
@@ -85,36 +105,44 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
     )
 
-    use_cache = False
+    data = None
     if os.path.exists(data_file):
         file_age = time.time() - os.path.getmtime(data_file)
         if file_age <= _CACHE_MAX_AGE_SECONDS:
-            use_cache = True
+            cached_file = pd.read_csv(
+                data_file, on_bad_lines="skip", encoding="utf-8"
+            )
+            if not cached_file.empty and "Close" in cached_file.columns:
+                data = cached_file
         else:
             logger.info(
                 f"Cache for {symbol} is {file_age / 3600:.1f}h old, refreshing"
             )
 
-    if use_cache:
-        data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-    else:
-        data = yf_retry(lambda: yf.download(
-            symbol,
+    if data is None:
+        downloaded = yf_retry(lambda: yf.download(
+            canonical,
             start=start_str,
             end=end_str,
             multi_level_index=False,
             progress=False,
             auto_adjust=True,
         ))
-        data = data.reset_index()
-        data.to_csv(data_file, index=False, encoding="utf-8")
+        downloaded = _ensure_date_column(downloaded.reset_index())
+        # Only cache real data — never persist an empty frame.
+        if downloaded.empty or "Close" not in downloaded.columns:
+            raise NoMarketDataError(
+                symbol, canonical, "Yahoo Finance returned no rows"
+            )
+        downloaded.to_csv(data_file, index=False, encoding="utf-8")
+        data = downloaded
 
     data = _clean_dataframe(data)
 
     # Filter to curr_date to prevent look-ahead bias in backtesting
     data = data[data["Date"] <= curr_date_dt]
 
-    cache_put(("ohlcv", symbol, curr_date), data)
+    cache_put(cache_key, data)
 
     return data
 

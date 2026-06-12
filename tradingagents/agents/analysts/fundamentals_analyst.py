@@ -1,8 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
-    build_instrument_context,
     detect_instrument_kind,
     get_analyst_recommendations,
+    get_instrument_context_from_state,
     get_balance_sheet,
     get_cashflow,
     get_etf_correlation,
@@ -51,7 +51,7 @@ def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
-        instrument_context = build_instrument_context(ticker)
+        instrument_context = get_instrument_context_from_state(state)
         kind, _ = detect_instrument_kind(ticker)
 
         if kind == "etf":

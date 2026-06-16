@@ -7,7 +7,7 @@ chunks, so this runs without any LLM call or network access.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -23,10 +23,10 @@ from tradingagents.runner_events import (
 
 
 class _StubPropagator:
-    def create_initial_state(self, *args, **kwargs) -> Dict[str, Any]:
+    def create_initial_state(self, *args, **kwargs) -> dict[str, Any]:
         return {}
 
-    def get_graph_args(self, **kwargs) -> Dict[str, Any]:
+    def get_graph_args(self, **kwargs) -> dict[str, Any]:
         return {}
 
 
@@ -35,8 +35,7 @@ class _StubInnerGraph:
         self._chunks = chunks
 
     def stream(self, init_state, **kwargs):
-        for c in self._chunks:
-            yield c
+        yield from self._chunks
 
 
 class _StubGraph:
@@ -50,7 +49,7 @@ class _StubGraph:
         return "BUY"
 
 
-_FAKE_CHUNKS: List[Dict[str, Any]] = [
+_FAKE_CHUNKS: list[dict[str, Any]] = [
     {"messages": [], "market_report": "## Market\nlooks strong"},
     {"messages": [], "sentiment_report": "## Social\nbullish"},
     {"messages": [], "news_report": "## News\nneutral"},
@@ -123,7 +122,11 @@ def test_runner_emits_expected_event_sequence(tmp_path: Path) -> None:
     # Done event carries the decision and a report path
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert done and done[-1].decision == "BUY"
-    assert (runner.save_path / "complete_report.md").exists()
+    report = runner.save_path / "complete_report.md"
+    assert report.exists()
+    report_text = report.read_text(encoding="utf-8")
+    assert "## Market\nlooks strong" in report_text
+    assert "PM says BUY" in report_text
 
 
 def test_runner_dedups_repeat_status(tmp_path: Path) -> None:

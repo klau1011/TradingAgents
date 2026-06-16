@@ -1,8 +1,8 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
 from tradingagents.agents.utils.agent_utils import (
     detect_instrument_kind,
     get_analyst_recommendations,
-    get_instrument_context_from_state,
     get_balance_sheet,
     get_cashflow,
     get_etf_correlation,
@@ -12,10 +12,9 @@ from tradingagents.agents.utils.agent_utils import (
     get_fundamentals,
     get_income_statement,
     get_insider_transactions,
+    get_instrument_context_from_state,
     get_language_instruction,
 )
-from tradingagents.dataflows.config import get_config
-
 
 _EQUITY_SYSTEM_MESSAGE = (
     "You are a researcher tasked with analyzing fundamental information over the past week about a company. "

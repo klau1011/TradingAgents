@@ -14,15 +14,16 @@ branches do not corrupt each other.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List
+from collections.abc import Callable
+from typing import Any
 
 
 def create_parallel_analyst_runner(
-    analyst_node: Callable[[Dict[str, Any]], Dict[str, Any]],
+    analyst_node: Callable[[dict[str, Any]], dict[str, Any]],
     tool_node: Any,
     report_key: str,
     max_iterations: int = 10,
-) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Return a graph node that runs an analyst's tool-calling loop in isolation.
 
     Args:
@@ -33,14 +34,14 @@ def create_parallel_analyst_runner(
         max_iterations: Safety cap on tool-call rounds per analyst.
     """
 
-    def runner(state: Dict[str, Any]) -> Dict[str, Any]:
+    def runner(state: dict[str, Any]) -> dict[str, Any]:
         # Snapshot just the messages so each parallel analyst gets its own
         # private conversation buffer and never observes a sibling's tool calls.
         local_state = dict(state)
-        local_messages: List[Any] = list(state.get("messages", []))
+        local_messages: list[Any] = list(state.get("messages", []))
         local_state["messages"] = local_messages
 
-        emitted: List[Any] = []
+        emitted: list[Any] = []
         report = ""
 
         for _ in range(max_iterations):

@@ -6,9 +6,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from tradingagents.dataflows import interface
-from tradingagents.dataflows import y_finance_etf
-
+from tradingagents.dataflows import interface, y_finance_etf
 
 # ---------------------------------------------------------------------------
 # Routing / category registration

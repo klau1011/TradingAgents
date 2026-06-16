@@ -14,8 +14,7 @@ import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any
 
 from tradingagents.runner import AnalysisRunner, RunCancelled, RunnerConfig
 from tradingagents.runner_events import (
@@ -40,28 +39,28 @@ class RunRecord:
     # "cancelling" value (returned by ``DELETE /api/runs/{id}``) is *never*
     # stored here — it lives only in the HTTP response.
     status: str = "queued"  # queued | running | done | error | cancelled
-    queue_position: Optional[int] = None
+    queue_position: int | None = None
     created_at: str = field(
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
-    decision: Optional[str] = None
-    report_path: Optional[str] = None
-    error: Optional[str] = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    decision: str | None = None
+    report_path: str | None = None
+    error: str | None = None
 
     # Internal: bounded event log + live subscribers
-    events: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER_SIZE))
-    subscribers: List[asyncio.Queue] = field(default_factory=list)
+    events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER_SIZE))
+    subscribers: list[asyncio.Queue] = field(default_factory=list)
     # Cooperative cancel signal. Inspected by the AnalysisRunner's chunk loop
     # (worker thread) and by ``_execute`` before transitioning out of queued.
     # ``threading.Event`` is thread-safe and provides cross-thread visibility
     # so the cancel can be requested from the FastAPI threadpool while the
     # run executes in a different threadpool worker.
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    task: Optional[asyncio.Task] = None
+    task: asyncio.Task | None = None
 
-    def to_summary(self) -> Dict[str, Any]:
+    def to_summary(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "ticker": self.config.ticker,
@@ -82,11 +81,11 @@ class RunRegistry:
 
     def __init__(self, max_concurrent: int = MAX_CONCURRENT_RUNS) -> None:
         self._max_concurrent = max_concurrent
-        self._semaphore: Optional[asyncio.Semaphore] = None
-        self._runs: Dict[str, RunRecord] = {}
-        self._order: Deque[str] = deque(maxlen=MAX_RECENT_RUNS)
+        self._semaphore: asyncio.Semaphore | None = None
+        self._runs: dict[str, RunRecord] = {}
+        self._order: deque[str] = deque(maxlen=MAX_RECENT_RUNS)
         self._lock = asyncio.Lock()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _ensure_semaphore(self) -> asyncio.Semaphore:
         if self._semaphore is None:
@@ -117,7 +116,7 @@ class RunRegistry:
         record.task = asyncio.create_task(self._execute(record))
         return record
 
-    def _compute_queue_position(self, record: RunRecord) -> Optional[int]:
+    def _compute_queue_position(self, record: RunRecord) -> int | None:
         queued_before = [
             r for r in self._runs.values()
             if r.status == "queued" and r.created_at < record.created_at
@@ -126,7 +125,7 @@ class RunRegistry:
 
     def _evict_overflow(self) -> None:
         # Drop terminal runs that fall outside the recent window
-        live_ids = {rid for rid in self._order}
+        live_ids = set(self._order)
         for rid in list(self._runs.keys()):
             if rid not in live_ids and self._runs[rid].status in {
                 "done",
@@ -135,7 +134,7 @@ class RunRegistry:
             }:
                 self._runs.pop(rid, None)
 
-    def cancel(self, run_id: str) -> Optional[str]:
+    def cancel(self, run_id: str) -> str | None:
         """Request cancellation of a run.
 
         This method is safe to invoke from any thread — the only state it
@@ -295,7 +294,7 @@ class RunRegistry:
         except Exception:
             pass
 
-    def subscribe(self, run_id: str) -> Optional[tuple]:
+    def subscribe(self, run_id: str) -> tuple | None:
         """Return ``(buffered_events, queue)`` for a run, or ``None``."""
         record = self._runs.get(run_id)
         if record is None:
@@ -313,10 +312,10 @@ class RunRegistry:
     # Queries
     # ------------------------------------------------------------------
 
-    def get(self, run_id: str) -> Optional[RunRecord]:
+    def get(self, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
 
-    def list_runs(self) -> List[Dict[str, Any]]:
+    def list_runs(self) -> list[dict[str, Any]]:
         return [self._runs[rid].to_summary() for rid in self._order if rid in self._runs]
 
 

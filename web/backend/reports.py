@@ -8,7 +8,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -25,14 +25,14 @@ _FOLDER_RE = re.compile(
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _report_roots() -> List[Path]:
+def _report_roots() -> list[Path]:
     """Directories scanned for past reports.
 
     Reads from both the repo's local ``reports/`` and the user's configured
     ``results_dir``; new runs are written to ``results_dir`` (per default
     config), but legacy reports living in the repo are still surfaced.
     """
-    roots: List[Path] = []
+    roots: list[Path] = []
     repo_reports = _REPO_ROOT / "reports"
     if repo_reports.exists():
         roots.append(repo_reports)
@@ -42,14 +42,14 @@ def _report_roots() -> List[Path]:
     return roots
 
 
-def list_reports(include_incomplete: bool = False) -> List[Dict[str, Any]]:
+def list_reports(include_incomplete: bool = False) -> list[dict[str, Any]]:
     """List discoverable report folders.
 
     By default only folders containing ``complete_report.md`` are returned.
     Pass ``include_incomplete=True`` to also surface in-progress / abandoned
     folders with ``status="incomplete"`` so the UI can display them.
     """
-    seen: Dict[str, Dict[str, Any]] = {}
+    seen: dict[str, dict[str, Any]] = {}
     for root in _report_roots():
         try:
             entries = list(root.iterdir())
@@ -107,7 +107,7 @@ _REQUIRED_DECISION_FIELDS = (
 )
 
 
-def _load_validated_decision_json(decision_json: Path) -> Optional[Dict[str, Any]]:
+def _load_validated_decision_json(decision_json: Path) -> dict[str, Any] | None:
     """Load and validate decision.json, returning a normalized dict or None."""
     if not decision_json.exists():
         return None
@@ -126,7 +126,7 @@ def _load_validated_decision_json(decision_json: Path) -> Optional[Dict[str, Any
         )
         return None
 
-    normalized: Dict[str, Any] = {}
+    normalized: dict[str, Any] = {}
     for field in _REQUIRED_DECISION_FIELDS:
         value = payload.get(field)
         if not isinstance(value, str) or not value.strip():
@@ -163,7 +163,7 @@ def _load_validated_decision_json(decision_json: Path) -> Optional[Dict[str, Any
     return normalized
 
 
-def _peek_decision(folder: Path) -> Optional[str]:
+def _peek_decision(folder: Path) -> str | None:
     """Best-effort: extract a BUY/HOLD/SELL-style label from the portfolio file.
 
     Prefers the structured ``decision.json`` written by the Portfolio Manager
@@ -201,7 +201,7 @@ def _peek_decision(folder: Path) -> Optional[str]:
     return None
 
 
-def _load_full_decision(folder: Path) -> Optional[Dict[str, Any]]:
+def _load_full_decision(folder: Path) -> dict[str, Any] | None:
     """Return the parsed ``decision.json`` dict for the run, or ``None``.
 
     The dict shape mirrors ``tradingagents.agents.schemas.PortfolioDecision``:
@@ -212,7 +212,7 @@ def _load_full_decision(folder: Path) -> Optional[Dict[str, Any]]:
     return _load_validated_decision_json(decision_json)
 
 
-def get_decision(folder: str) -> Optional[Dict[str, Any]]:
+def get_decision(folder: str) -> dict[str, Any] | None:
     """Public accessor used by the API to serve the structured PM decision."""
     safe = _safe_folder(folder)
     if safe is None:
@@ -236,7 +236,7 @@ def _safe_read(path: Path) -> str:
         return _CORRUPT_PLACEHOLDER
 
 
-def _resolve_folder(safe: str, *, require_complete: bool = False) -> Optional[Path]:
+def _resolve_folder(safe: str, *, require_complete: bool = False) -> Path | None:
     """Resolve a folder name across report roots.
 
     When multiple roots contain the same folder, prefer the later root to match
@@ -244,7 +244,7 @@ def _resolve_folder(safe: str, *, require_complete: bool = False) -> Optional[Pa
     complete report so an incomplete shadow in an earlier root does not mask a
     complete folder in a later root.
     """
-    chosen: Optional[Path] = None
+    chosen: Path | None = None
     for root in _report_roots():
         candidate = root / safe
         if not candidate.exists() or not candidate.is_dir():
@@ -255,7 +255,7 @@ def _resolve_folder(safe: str, *, require_complete: bool = False) -> Optional[Pa
     return chosen
 
 
-def get_report(folder: str) -> Optional[Dict[str, Any]]:
+def get_report(folder: str) -> dict[str, Any] | None:
     safe = _safe_folder(folder)
     if safe is None:
         return None
@@ -263,7 +263,7 @@ def get_report(folder: str) -> Optional[Dict[str, Any]]:
     if candidate is None:
         return None
     complete = candidate / "complete_report.md"
-    sections: Dict[str, Dict[str, str]] = {}
+    sections: dict[str, dict[str, str]] = {}
     for sub in ("0_summary", "1_analysts", "2_research", "3_trading", "4_risk", "5_portfolio"):
         sub_dir = candidate / sub
         if not sub_dir.exists():
@@ -273,7 +273,7 @@ def get_report(folder: str) -> Optional[Dict[str, Any]]:
         except OSError as exc:
             logger.warning("Could not list report subdir %s: %s", sub_dir, exc)
             continue
-        files: Dict[str, str] = {}
+        files: dict[str, str] = {}
         for f in sub_entries:
             if f.suffix == ".md":
                 files[f.stem] = _safe_read(f)
@@ -294,7 +294,7 @@ def get_report(folder: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _safe_folder(folder: str) -> Optional[str]:
+def _safe_folder(folder: str) -> str | None:
     """Reject anything that isn't a plain ``TICKER_TIMESTAMP`` segment."""
     if not folder or "/" in folder or "\\" in folder or os.sep in folder:
         return None

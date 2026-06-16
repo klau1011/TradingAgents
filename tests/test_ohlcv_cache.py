@@ -7,7 +7,6 @@ import threading
 from unittest.mock import patch
 
 import pandas as pd
-import pytest
 
 from tradingagents.dataflows.ohlcv_cache import (
     cache_get,
@@ -57,7 +56,7 @@ def test_load_ohlcv_dedupes_within_run():
 
     fake_payload = pd.DataFrame(
         {
-            "Date": pd.date_range("2024-01-01", periods=3),
+            "Date": pd.date_range("2026-04-23", periods=3),
             "Open": [1.0, 2.0, 3.0],
             "High": [1.0, 2.0, 3.0],
             "Low": [1.0, 2.0, 3.0],
@@ -104,8 +103,10 @@ def test_concurrent_runs_have_independent_caches():
 
     t1 = threading.Thread(target=worker, args=("AAPL", 100.0))
     t2 = threading.Thread(target=worker, args=("MSFT", 200.0))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     assert results["AAPL"] == (100.0, None)
     assert results["MSFT"] == (200.0, None)

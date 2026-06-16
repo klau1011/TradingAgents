@@ -1,39 +1,68 @@
 import functools
 import logging
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from contextlib import suppress
+from typing import Any
 
 import yfinance as yf
 from langchain_core.messages import HumanMessage, RemoveMessage
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import (
+    get_live_quote,
     get_stock_data,
-    get_live_quote
-)
-from tradingagents.agents.utils.technical_indicators_tools import (
-    get_indicators
-)
-from tradingagents.agents.utils.fundamental_data_tools import (
-    get_fundamentals,
-    get_balance_sheet,
-    get_cashflow,
-    get_income_statement,
-    get_analyst_recommendations
 )
 from tradingagents.agents.utils.etf_data_tools import (
-    get_etf_profile,
-    get_etf_holdings,
-    get_etf_sector_weights,
     get_etf_correlation,
+    get_etf_holdings,
+    get_etf_profile,
+    get_etf_sector_weights,
 )
+from tradingagents.agents.utils.fundamental_data_tools import (
+    get_analyst_recommendations,
+    get_balance_sheet,
+    get_cashflow,
+    get_fundamentals,
+    get_income_statement,
+)
+from tradingagents.agents.utils.macro_data_tools import get_macro_indicators
+from tradingagents.agents.utils.market_data_validation_tools import get_verified_market_snapshot
 from tradingagents.agents.utils.news_data_tools import (
-    get_news,
+    get_global_news,
     get_insider_transactions,
-    get_global_news
+    get_news,
 )
-from tradingagents.agents.utils.market_data_validation_tools import (
-    get_verified_market_snapshot
-)
+from tradingagents.agents.utils.prediction_markets_tools import get_prediction_markets
+from tradingagents.agents.utils.technical_indicators_tools import get_indicators
+
+# Public surface: the data tools are imported here so agents and the graph
+# import them from one place, plus the instrument/language helpers defined below.
+__all__ = [
+    "get_stock_data",
+    "get_live_quote",
+    "get_indicators",
+    "get_fundamentals",
+    "get_balance_sheet",
+    "get_cashflow",
+    "get_income_statement",
+    "get_analyst_recommendations",
+    "get_etf_profile",
+    "get_etf_holdings",
+    "get_etf_sector_weights",
+    "get_etf_correlation",
+    "get_news",
+    "get_global_news",
+    "get_insider_transactions",
+    "get_macro_indicators",
+    "get_prediction_markets",
+    "get_verified_market_snapshot",
+    "build_instrument_context",
+    "detect_instrument_kind",
+    "resolve_instrument_identity",
+    "get_instrument_context_from_state",
+    "get_language_instruction",
+    "create_msg_delete",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +89,10 @@ def detect_instrument_kind(ticker: str) -> tuple[str, dict]:
     ``info`` is the raw ``yfinance`` ``info`` dict (or ``{}`` on failure) so callers
     can reuse it without making a second network round-trip.
     """
+    from tradingagents.dataflows.symbol_utils import normalize_symbol
+
     try:
-        info = yf.Ticker(ticker.upper()).info or {}
+        info = yf.Ticker(normalize_symbol(ticker)).info or {}
     except Exception:
         return "unknown", {}
 
@@ -73,7 +104,7 @@ def detect_instrument_kind(ticker: str) -> tuple[str, dict]:
     return "unknown", info
 
 
-def _clean_identity_value(value: Any) -> Optional[str]:
+def _clean_identity_value(value: Any) -> str | None:
     """Return a trimmed string, or None for empty / placeholder-ish values."""
     if not isinstance(value, str):
         return None
@@ -97,9 +128,14 @@ def resolve_instrument_identity(ticker: str) -> dict[str, Any]:
     recognise the ticker, we return ``{}`` and the caller falls back to
     ticker-only context rather than failing before analysis starts. Cached so
     the lookup happens at most once per ticker per process.
+
+    The symbol is normalized first (e.g. ``XAUUSD`` -> ``GC=F``) so identity
+    resolves for the same instrument the price path actually fetches (#983).
     """
+    from tradingagents.dataflows.symbol_utils import normalize_symbol
+
     try:
-        info = yf.Ticker(ticker.upper()).info or {}
+        info = yf.Ticker(normalize_symbol(ticker)).info or {}
     except Exception as exc:  # noqa: BLE001 — fail open, never block the run
         logger.debug("Could not resolve instrument identity for %s: %s", ticker, exc)
         return {}
@@ -134,7 +170,7 @@ def resolve_instrument_identity(ticker: str) -> dict[str, Any]:
 def build_instrument_context(
     ticker: str,
     asset_type: str = "stock",
-    identity: Optional[Mapping[str, Any]] = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> str:
     """Describe the exact instrument so agents preserve identity and ticker.
 
@@ -188,16 +224,12 @@ def build_instrument_context(
         parts = [f"category: {category}"]
         total_assets = (identity or {}).get("total_assets")
         if total_assets:
-            try:
+            with suppress(TypeError, ValueError):
                 parts.append(f"AUM ~{float(total_assets):,.0f}")
-            except (TypeError, ValueError):
-                pass
         expense_ratio = (identity or {}).get("expense_ratio")
         if expense_ratio:
-            try:
+            with suppress(TypeError, ValueError):
                 parts.append(f"expense ratio {float(expense_ratio):.2f}%")
-            except (TypeError, ValueError):
-                pass
         context += (
             f"\n\nIMPORTANT: `{ticker}` is an ETF; {', '.join(parts)}. "
             "Treat it as a basket, not an operating company: focus on holdings "
@@ -253,6 +285,3 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
-
-        

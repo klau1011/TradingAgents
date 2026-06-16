@@ -68,7 +68,7 @@ class ResolveInstrumentIdentityTests(unittest.TestCase):
 @pytest.mark.unit
 class BuildInstrumentContextTests(unittest.TestCase):
     def test_mentions_exact_symbol_without_identity(self):
-        context = build_instrument_context("7203.T")
+        context = build_instrument_context("7203.T", identity={})
         self.assertIn("7203.T", context)
         self.assertIn("exchange suffix", context)
         self.assertNotIn("Resolved identity", context)

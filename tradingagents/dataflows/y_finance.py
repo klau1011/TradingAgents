@@ -1,12 +1,19 @@
-from typing import Annotated
 from datetime import datetime
-from dateutil.relativedelta import relativedelta
+from typing import Annotated
+
 import pandas as pd
 import yfinance as yf
-import os
-from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
+from dateutil.relativedelta import relativedelta
+
 from .ohlcv_cache import cache_get, cache_put
-from .symbol_utils import normalize_symbol, NoMarketDataError
+from .stockstats_utils import (
+    StockstatsUtils,
+    _assert_ohlcv_not_stale,
+    filter_financials_by_date,
+    load_ohlcv,
+    yf_retry,
+)
+from .symbol_utils import NoMarketDataError, normalize_symbol
 
 _VOLUME_WINDOW = 20
 _INDICATOR_ALIASES = {
@@ -89,7 +96,7 @@ def get_YFin_data_online(
 ):
 
     datetime.strptime(start_date, "%Y-%m-%d")
-    datetime.strptime(end_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
 
     canonical = normalize_symbol(symbol)
 
@@ -103,12 +110,11 @@ def get_YFin_data_online(
     # Resolve broker/forex symbols to Yahoo's convention (XAUUSD+ -> GC=F).
     ticker = yf.Ticker(canonical)
 
-    # yfinance 'end' is exclusive, so add 1 day to include end_date
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + relativedelta(days=1)
-    end_date_inclusive = end_dt.strftime("%Y-%m-%d")
-
-    # Fetch historical data for the specified date range
-    data = yf_retry(lambda: ticker.history(start=start_date, end=end_date_inclusive))
+    # yfinance treats ``end`` as EXCLUSIVE, so it would drop the requested
+    # end_date row (and the current day when end_date is today). Request one day
+    # past end_date so the requested range is actually inclusive (#986/#987).
+    end_inclusive = (end_dt + relativedelta(days=1)).strftime("%Y-%m-%d")
+    data = yf_retry(lambda: ticker.history(start=start_date, end=end_inclusive))
 
     # Empty result means the symbol is unknown/delisted. Raise a typed error
     # instead of returning prose: the routing layer turns it into a single
@@ -121,6 +127,11 @@ def get_YFin_data_online(
     # Remove timezone info from index for cleaner output
     if data.index.tz is not None:
         data.index = data.index.tz_localize(None)
+
+    # Reject a stale frame (e.g. a year-old partial response) before it is
+    # formatted into the report. Raises NoMarketDataError, which the router
+    # turns into one clear unavailable signal (#1021).
+    _assert_ohlcv_not_stale(data, end_date, symbol, canonical)
 
     # Round numerical values to 2 decimal places for cleaner display
     numeric_columns = ["Open", "High", "Low", "Close", "Adj Close"]
@@ -253,23 +264,23 @@ def get_stock_stats_indicators_window(
     # Optimized: Get stock data once and calculate indicators for all dates
     try:
         indicator_data = _get_stock_stats_bulk(symbol, indicator, curr_date)
-        
+
         # Generate the date range we need
         current_dt = curr_date_dt
         date_values = []
-        
+
         while current_dt >= before:
             date_str = current_dt.strftime('%Y-%m-%d')
-            
+
             # Look up the indicator value for this date
             if date_str in indicator_data:
                 indicator_value = indicator_data[date_str]
             else:
                 indicator_value = "N/A: Not a trading day (weekend or holiday)"
-            
+
             date_values.append((date_str, indicator_value))
             current_dt = current_dt - relativedelta(days=1)
-        
+
         # Build the result string
         ind_string = ""
         for date_str, value in date_values:
@@ -334,19 +345,18 @@ def _get_stock_stats_bulk(
 
         # Calculate the indicator for all rows at once
         df[indicator]  # This triggers stockstats to calculate the indicator
-    
     # Create a dictionary mapping date strings to indicator values
     result_dict = {}
     for _, row in df.iterrows():
         date_str = row["Date"]
         indicator_value = row[indicator]
-        
+
         # Handle NaN/None values
         if pd.isna(indicator_value) or indicator_value in (float("inf"), float("-inf")):
             result_dict[date_str] = "N/A"
         else:
             result_dict[date_str] = str(indicator_value)
-    
+
     return result_dict
 
 
@@ -585,9 +595,9 @@ def get_insider_transactions(
         # Add header information
         header = f"# Insider Transactions data for {canonical}\n"
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        
+
         return header + csv_string
-        
+
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"
 
@@ -596,15 +606,16 @@ def get_analyst_recommendations(
     ticker: Annotated[str, "ticker symbol of the company"]
 ):
     """Get Wall Street analyst recommendations and price targets from yfinance."""
+    canonical = normalize_symbol(ticker)
     try:
-        ticker_obj = yf.Ticker(ticker.upper())
+        ticker_obj = yf.Ticker(canonical)
         sections = []
 
         # Price targets
         try:
             targets = yf_retry(lambda: ticker_obj.analyst_price_targets)
             if targets is not None and not (isinstance(targets, pd.DataFrame) and targets.empty):
-                sections.append(f"## Analyst Price Targets for {ticker.upper()}")
+                sections.append(f"## Analyst Price Targets for {canonical}")
                 if isinstance(targets, dict):
                     for k, v in targets.items():
                         if v is not None:
@@ -618,7 +629,7 @@ def get_analyst_recommendations(
         try:
             recs = yf_retry(lambda: ticker_obj.recommendations)
             if recs is not None and not recs.empty:
-                sections.append(f"\n## Recent Analyst Recommendations for {ticker.upper()}")
+                sections.append(f"\n## Recent Analyst Recommendations for {canonical}")
                 sections.append(recs.head(20).to_csv())
         except Exception:
             pass
@@ -627,7 +638,7 @@ def get_analyst_recommendations(
         try:
             upgrades = yf_retry(lambda: ticker_obj.upgrades_downgrades)
             if upgrades is not None and not upgrades.empty:
-                sections.append(f"\n## Recent Upgrades/Downgrades for {ticker.upper()}")
+                sections.append(f"\n## Recent Upgrades/Downgrades for {canonical}")
                 sections.append(upgrades.head(20).to_csv())
         except Exception:
             pass
@@ -635,7 +646,7 @@ def get_analyst_recommendations(
         if not sections:
             return f"No analyst recommendation data found for symbol '{ticker}'"
 
-        header = f"# Analyst Recommendations for {ticker.upper()}\n"
+        header = f"# Analyst Recommendations for {canonical}\n"
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
         return header + "\n".join(sections)
@@ -652,8 +663,9 @@ def get_live_quote(
     Returns last price, day range, volume, previous close, and percent change.
     Useful mid-trading-day when daily OHLCV bars only reflect the open.
     """
+    canonical = normalize_symbol(ticker)
     try:
-        t = yf.Ticker(ticker.upper())
+        t = yf.Ticker(canonical)
         fi = t.fast_info
 
         last = fi.get("lastPrice")
@@ -671,7 +683,7 @@ def get_live_quote(
             change = ((last - prev_close) / prev_close) * 100
             pct_change = f"Change from prev close: {change:+.2f}%\n"
 
-        header = f"# Live Quote Snapshot for {ticker.upper()}\n"
+        header = f"# Live Quote Snapshot for {canonical}\n"
         header += f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (delayed ~15 min)\n\n"
 
         lines = [
@@ -683,7 +695,7 @@ def get_live_quote(
             f"Market Cap: {mkt_cap:,.0f}" if mkt_cap else None,
         ]
 
-        return header + "\n".join(l for l in lines if l)
+        return header + "\n".join(line for line in lines if line)
 
     except Exception as e:
         return f"Error retrieving live quote for {ticker}: {str(e)}"

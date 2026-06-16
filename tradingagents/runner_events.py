@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 
 def _now_iso() -> str:
@@ -26,7 +26,7 @@ class StatusEvent:
 
     status: RunStatus
     type: str = "status"
-    queue_position: Optional[int] = None
+    queue_position: int | None = None
     timestamp: str = field(default_factory=_now_iso)
 
 
@@ -49,7 +49,7 @@ class MessageEvent:
 @dataclass
 class ToolCallEvent:
     tool_name: str
-    args: Dict[str, Any]
+    args: dict[str, Any]
     type: str = "tool_call"
     timestamp: str = field(default_factory=_now_iso)
 
@@ -65,8 +65,8 @@ class ReportSectionEvent:
 @dataclass
 class DoneEvent:
     decision: str
-    final_state_path: Optional[str] = None
-    report_path: Optional[str] = None
+    final_state_path: str | None = None
+    report_path: str | None = None
     type: str = "done"
     timestamp: str = field(default_factory=_now_iso)
 
@@ -78,17 +78,17 @@ class ErrorEvent:
     timestamp: str = field(default_factory=_now_iso)
 
 
-RunEvent = Union[
-    StatusEvent,
-    AgentStatusEvent,
-    MessageEvent,
-    ToolCallEvent,
-    ReportSectionEvent,
-    DoneEvent,
-    ErrorEvent,
-]
+RunEvent = (
+    StatusEvent
+    | AgentStatusEvent
+    | MessageEvent
+    | ToolCallEvent
+    | ReportSectionEvent
+    | DoneEvent
+    | ErrorEvent
+)
 
 
-def event_to_dict(event: RunEvent) -> Dict[str, Any]:
+def event_to_dict(event: RunEvent) -> dict[str, Any]:
     """Serialize a run event to a plain dict suitable for JSON encoding."""
     return asdict(event)

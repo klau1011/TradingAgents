@@ -29,6 +29,9 @@ def test_config_options(client) -> None:
     assert "models" in body and "openai" in body["models"]
     assert "api_key_status" in body
     assert "openai" in body["api_key_status"]
+    assert set(body["models"]).issubset(body["api_key_status"])
+    assert body["api_key_status"]["bedrock"]["required"] is False
+    assert body["api_key_status"]["openai_compatible"]["required"] is False
 
 
 def test_reports_index_runs(client) -> None:
@@ -43,6 +46,27 @@ def test_start_run_validates_ticker(client) -> None:
         json={"ticker": "bad ticker!!", "analysis_date": "2025-01-02"},
     )
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize("ticker", ["GC=F", "^GSPC", "000404.SZ", "BTC-USD"])
+def test_start_run_accepts_yahoo_ticker_forms(client, monkeypatch, ticker: str) -> None:
+    from web.backend import runs as runs_mod
+
+    async def fake_submit(config):
+        class Record:
+            run_id = "fake"
+
+            def to_summary(self):
+                return {"run_id": self.run_id, "ticker": config.ticker}
+
+        return Record()
+
+    monkeypatch.setattr(runs_mod.registry, "submit", fake_submit)
+    r = client.post(
+        "/api/runs",
+        json={"ticker": ticker, "analysis_date": "2025-01-02"},
+    )
+    assert r.status_code == 202
 
 
 def test_start_run_rejects_future_date(client) -> None:
@@ -100,9 +124,9 @@ def test_cancel_running_run_emits_cancelled_status(monkeypatch) -> None:
     """
     import time
 
-    from web.backend.app import app
-    from web.backend import runs as runs_mod
     from tradingagents.runner import RunCancelled
+    from web.backend import runs as runs_mod
+    from web.backend.app import app
 
     def fake_run(self):
         # Long enough that we definitely cancel mid-flight, while polling the
@@ -166,8 +190,8 @@ def test_cancel_terminal_run_returns_terminal_status(monkeypatch) -> None:
     does not transition anything."""
     import time
 
-    from web.backend.app import app
     from web.backend import runs as runs_mod
+    from web.backend.app import app
 
     monkeypatch.setattr(
         runs_mod.AnalysisRunner,

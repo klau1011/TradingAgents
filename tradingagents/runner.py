@@ -21,15 +21,12 @@ import datetime
 import threading
 import traceback
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
-
-class RunCancelled(Exception):
-    """Raised inside the runner when an external cancel is requested."""
-
-
+from tradingagents.dataflows.ohlcv_cache import start_run_cache
 from tradingagents.default_config import (
     ANALYST_DISPLAY_NAMES,
     ANALYST_ORDER,
@@ -38,7 +35,6 @@ from tradingagents.default_config import (
     FIXED_AGENTS,
     REPORT_SECTIONS,
 )
-from tradingagents.dataflows.ohlcv_cache import start_run_cache
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.runner_events import (
     AgentStatusEvent,
@@ -51,8 +47,12 @@ from tradingagents.runner_events import (
     ToolCallEvent,
 )
 
-
 EventCallback = Callable[[RunEvent], None]
+_CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
+
+
+class RunCancelled(Exception):
+    """Raised inside the runner when an external cancel is requested."""
 
 
 # ---------------------------------------------------------------------------
@@ -69,17 +69,17 @@ class RunnerConfig:
 
     ticker: str
     analysis_date: str
-    analysts: List[str]  # subset of ANALYST_ORDER
+    analysts: list[str]  # subset of ANALYST_ORDER
     research_depth: int = 1
     llm_provider: str = "openai"
     backend_url: str = "https://api.openai.com/v1"
     shallow_thinker: str = "gpt-5.4-mini"
     deep_thinker: str = "gpt-5.5"
     output_language: str = "English"
-    google_thinking_level: Optional[str] = None
-    openai_reasoning_effort: Optional[str] = None
-    anthropic_effort: Optional[str] = None
-    extra_config: Dict[str, Any] = field(default_factory=dict)
+    google_thinking_level: str | None = None
+    openai_reasoning_effort: str | None = None
+    anthropic_effort: str | None = None
+    extra_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Normalize and validate user-provided config values early."""
@@ -87,7 +87,7 @@ class RunnerConfig:
         if not self.ticker:
             raise ValueError("ticker must be a non-empty string")
 
-        normalized: List[str] = []
+        normalized: list[str] = []
         for analyst in self.analysts:
             key = str(analyst).strip().lower()
             if key not in ANALYST_ORDER:
@@ -103,7 +103,7 @@ class RunnerConfig:
 
         self.analysts = normalized
 
-    def to_graph_config(self) -> Dict[str, Any]:
+    def to_graph_config(self) -> dict[str, Any]:
         """Build the dict consumed by ``TradingAgentsGraph``."""
         cfg = DEFAULT_CONFIG.copy()
         cfg["max_debate_rounds"] = self.research_depth
@@ -145,10 +145,10 @@ class AnalysisRunner:
     def __init__(
         self,
         config: RunnerConfig,
-        on_event: Optional[EventCallback] = None,
-        save_dir: Optional[Path] = None,
-        callbacks: Optional[List[Any]] = None,
-        cancel_event: Optional[threading.Event] = None,
+        on_event: EventCallback | None = None,
+        save_dir: Path | None = None,
+        callbacks: list[Any] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.config = config
         self.on_event = on_event or (lambda _e: None)
@@ -168,8 +168,8 @@ class AnalysisRunner:
 
         # Internal state mirroring cli MessageBuffer
         self._selected_analysts = [a.lower() for a in config.analysts]
-        self._agent_status: Dict[str, str] = {}
-        self._report_sections: Dict[str, Optional[str]] = {}
+        self._agent_status: dict[str, str] = {}
+        self._report_sections: dict[str, str | None] = {}
         self._processed_message_ids: set = set()
 
         for key in self._selected_analysts:
@@ -187,7 +187,7 @@ class AnalysisRunner:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self) -> Dict[str, Any]:
+    def run(self) -> dict[str, Any]:
         """Execute the analysis. Returns the final state dict."""
         try:
             self._emit(StatusEvent(status="running"))
@@ -222,8 +222,35 @@ class AnalysisRunner:
                 first = ANALYST_DISPLAY_NAMES[self._selected_analysts[0]]
                 self._set_agent_status(first, "in_progress")
 
+            asset_type = _detect_asset_type(self.config.ticker)
+            if asset_type != "stock":
+                self._emit(
+                    MessageEvent(
+                        message_type="System",
+                        content=f"Detected asset type: {asset_type}",
+                    )
+                )
+
+            if hasattr(graph, "_resolve_pending_entries"):
+                graph._resolve_pending_entries(self.config.ticker)
+
+            past_context = ""
+            memory_log = getattr(graph, "memory_log", None)
+            if memory_log is not None:
+                past_context = memory_log.get_past_context(self.config.ticker)
+
+            instrument_context = ""
+            if hasattr(graph, "resolve_instrument_context"):
+                instrument_context = graph.resolve_instrument_context(
+                    self.config.ticker, asset_type
+                )
+
             init_state = graph.propagator.create_initial_state(
-                self.config.ticker, self.config.analysis_date
+                self.config.ticker,
+                self.config.analysis_date,
+                asset_type=asset_type,
+                past_context=past_context,
+                instrument_context=instrument_context,
             )
             args = graph.propagator.get_graph_args(callbacks=self.callbacks)
 
@@ -239,6 +266,13 @@ class AnalysisRunner:
                     self._set_report_section(section, final_state[section])
 
             decision = graph.process_signal(final_state["final_trade_decision"])
+
+            if memory_log is not None:
+                memory_log.store_decision(
+                    ticker=self.config.ticker,
+                    trade_date=self.config.analysis_date,
+                    final_trade_decision=final_state["final_trade_decision"],
+                )
 
             report_path = save_report_to_disk(
                 final_state, self.config.ticker, self.save_path
@@ -274,7 +308,7 @@ class AnalysisRunner:
     # Streaming loop
     # ------------------------------------------------------------------
 
-    def _stream(self, graph, init_state, args) -> Dict[str, Any]:
+    def _stream(self, graph, init_state, args) -> dict[str, Any]:
         # Per-run OHLCV cache: dedupes yfinance fetches across analysts within
         # this run. Required here because the web/CLI paths bypass
         # ``TradingAgentsGraph._run_graph`` (which has its own cache scope).
@@ -287,9 +321,13 @@ class AnalysisRunner:
                 trace.append(chunk)
             if not trace:
                 raise RuntimeError("Graph produced no output chunks")
-        return trace[-1]
 
-    def _process_chunk(self, chunk: Dict[str, Any]) -> None:
+        final_state: dict[str, Any] = {}
+        for chunk in trace:
+            final_state.update(chunk)
+        return final_state
+
+    def _process_chunk(self, chunk: dict[str, Any]) -> None:
         # Messages + tool calls
         for message in chunk.get("messages", []):
             msg_id = getattr(message, "id", None)
@@ -373,24 +411,23 @@ class AnalysisRunner:
                 self._set_report_section(
                     "final_trade_decision", f"### Neutral Analyst Analysis\n{neu}"
                 )
-            if judge:
-                if self._agent_status.get("Portfolio Manager") != "completed":
-                    self._set_agent_status("Portfolio Manager", "in_progress")
-                    self._set_report_section(
-                        "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
-                    )
-                    self._set_agent_status("Aggressive Analyst", "completed")
-                    self._set_agent_status("Conservative Analyst", "completed")
-                    self._set_agent_status("Neutral Analyst", "completed")
-                    self._set_agent_status("Portfolio Manager", "completed")
-                    self._set_agent_status("Investor Briefing", "in_progress")
+            if judge and self._agent_status.get("Portfolio Manager") != "completed":
+                self._set_agent_status("Portfolio Manager", "in_progress")
+                self._set_report_section(
+                    "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
+                )
+                self._set_agent_status("Aggressive Analyst", "completed")
+                self._set_agent_status("Conservative Analyst", "completed")
+                self._set_agent_status("Neutral Analyst", "completed")
+                self._set_agent_status("Portfolio Manager", "completed")
+                self._set_agent_status("Investor Briefing", "in_progress")
 
         # Investor briefing (plain-language summary, runs last)
         if chunk.get("investor_briefing"):
             self._set_report_section("investor_briefing", chunk["investor_briefing"])
             self._set_agent_status("Investor Briefing", "completed")
 
-    def _update_analyst_statuses(self, chunk: Dict[str, Any]) -> None:
+    def _update_analyst_statuses(self, chunk: dict[str, Any]) -> None:
         found_active = False
         for analyst_key in ANALYST_ORDER:
             if analyst_key not in self._selected_analysts:
@@ -410,9 +447,12 @@ class AnalysisRunner:
             else:
                 self._set_agent_status(agent_name, "pending")
 
-        if not found_active and self._selected_analysts:
-            if self._agent_status.get("Bull Researcher") == "pending":
-                self._set_agent_status("Bull Researcher", "in_progress")
+        if (
+            not found_active
+            and self._selected_analysts
+            and self._agent_status.get("Bull Researcher") == "pending"
+        ):
+            self._set_agent_status("Bull Researcher", "in_progress")
 
     # ------------------------------------------------------------------
     # State mutations + emission helpers (deduplicate to avoid noisy events)
@@ -447,7 +487,7 @@ class AnalysisRunner:
 # ---------------------------------------------------------------------------
 
 
-def _extract_content_string(content) -> Optional[str]:
+def _extract_content_string(content) -> str | None:
     """Extract a display string from a LangChain message ``content`` field."""
     import ast
 
@@ -483,7 +523,17 @@ def _extract_content_string(content) -> Optional[str]:
     return str(content).strip() if not is_empty(content) else None
 
 
-def _coerce_tool_args(raw: Any) -> Dict[str, Any]:
+def _detect_asset_type(ticker: str) -> str:
+    try:
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+        canonical = normalize_symbol(ticker)
+    except Exception:
+        canonical = ticker.strip().upper()
+    return "crypto" if canonical.endswith(_CRYPTO_SUFFIXES) else "stock"
+
+
+def _coerce_tool_args(raw: Any) -> dict[str, Any]:
     """Best-effort normalize a tool-call ``args`` payload into a dict.
 
     Some providers emit ``args`` as ``None`` (zero-arg tools) or as already-
@@ -515,13 +565,13 @@ def _classify_message(message) -> tuple:
     return ("System", content)
 
 
-def save_report_to_disk(final_state: Dict[str, Any], ticker: str, save_path: Path) -> Path:
+def save_report_to_disk(final_state: dict[str, Any], ticker: str, save_path: Path) -> Path:
     """Persist the final report to disk using the CLI's folder layout.
 
     Returns the path to the consolidated ``complete_report.md``.
     """
     save_path.mkdir(parents=True, exist_ok=True)
-    sections: List[str] = []
+    sections: list[str] = []
 
     # 0. Investor briefing (plain-language summary, shown first)
     briefing = final_state.get("investor_briefing")

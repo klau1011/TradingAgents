@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -38,7 +39,7 @@ def _read_json_cache(path: str):
     if age > _ETF_CACHE_MAX_AGE_SECONDS:
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -205,15 +206,11 @@ def get_etf_holdings(
 
         if df is None or (hasattr(df, "empty") and df.empty):
             return f"No holdings data available for '{ticker}'."
-        try:
+        with suppress(Exception):
             df.to_csv(cache_path)
-        except Exception:
-            pass
 
-    try:
+    with suppress(Exception):
         df = df.head(int(top_n))
-    except Exception:
-        pass
 
     header = (
         f"# Top {len(df)} Holdings for {symbol}\n"

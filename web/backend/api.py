@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
 import datetime
-import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from contextlib import suppress
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, field_validator
 
 from tradingagents.default_config import ANALYST_ORDER, VALID_ANALYSTS
+from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
+from tradingagents.runner import RunnerConfig
 
 from .reports import (
     get_decision,
@@ -21,7 +22,6 @@ from .reports import (
     list_reports,
 )
 from .runs import registry
-from tradingagents.runner import RunnerConfig
 
 router = APIRouter()
 
@@ -31,23 +31,23 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
-_TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,15}$")
+_TICKER_RE = re.compile(r"^[A-Z0-9._\-^=]{1,32}$")
 _VALID_PROVIDERS = set(MODEL_OPTIONS.keys()) | {"openrouter", "azure"}
 
 
 class StartRunRequest(BaseModel):
     ticker: str
     analysis_date: str
-    analysts: List[str] = Field(default_factory=lambda: list(ANALYST_ORDER))
+    analysts: list[str] = Field(default_factory=lambda: list(ANALYST_ORDER))
     research_depth: int = 1
     llm_provider: str = "openai"
     backend_url: str = "https://api.openai.com/v1"
     shallow_thinker: str = "gpt-5.4-mini"
     deep_thinker: str = "gpt-5.5"
     output_language: str = "English"
-    google_thinking_level: Optional[str] = None
-    openai_reasoning_effort: Optional[str] = None
-    anthropic_effort: Optional[str] = None
+    google_thinking_level: str | None = None
+    openai_reasoning_effort: str | None = None
+    anthropic_effort: str | None = None
 
     @field_validator("ticker")
     @classmethod
@@ -70,7 +70,7 @@ class StartRunRequest(BaseModel):
 
     @field_validator("analysts")
     @classmethod
-    def _v_analysts(cls, v: List[str]) -> List[str]:
+    def _v_analysts(cls, v: list[str]) -> list[str]:
         v = [a.lower() for a in v]
         if not v:
             raise ValueError("Select at least one analyst")
@@ -100,33 +100,24 @@ class StartRunRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-_PROVIDER_ENV_KEYS: Dict[str, List[str]] = {
-    "openai": ["OPENAI_API_KEY"],
-    "anthropic": ["ANTHROPIC_API_KEY"],
-    "google": ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-    "xai": ["XAI_API_KEY"],
-    "deepseek": ["DEEPSEEK_API_KEY"],
-    "qwen": ["DASHSCOPE_API_KEY"],
-    "glm": ["ZHIPUAI_API_KEY"],
-    "openrouter": ["OPENROUTER_API_KEY"],
-    "azure": ["AZURE_OPENAI_API_KEY"],
-    "ollama": [],  # local, no key required
-}
+_KEY_OPTIONAL_PROVIDERS = {"bedrock", "ollama", "openai_compatible"}
 
 
-def _provider_key_status() -> Dict[str, Dict[str, Any]]:
-    out: Dict[str, Dict[str, Any]] = {}
-    for prov, keys in _PROVIDER_ENV_KEYS.items():
-        if not keys:
-            out[prov] = {"required": False, "set": True, "env_vars": []}
-            continue
+def _provider_key_status() -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for prov in sorted(_VALID_PROVIDERS):
+        env_var = PROVIDER_API_KEY_ENV.get(prov)
+        keys = [env_var] if env_var else []
+        if prov == "google":
+            keys.append("GEMINI_API_KEY")
+        required = prov not in _KEY_OPTIONAL_PROVIDERS
         present = any(os.getenv(k) for k in keys)
-        out[prov] = {"required": True, "set": present, "env_vars": keys}
+        out[prov] = {"required": required, "set": True if not required else present, "env_vars": keys}
     return out
 
 
 @router.get("/api/config/options")
-def config_options() -> Dict[str, Any]:
+def config_options() -> dict[str, Any]:
     return {
         "analysts": [
             {"key": "market", "label": "Market Analyst"},
@@ -152,7 +143,7 @@ def config_options() -> Dict[str, Any]:
 
 
 @router.post("/api/runs", status_code=202)
-async def start_run(payload: StartRunRequest, response: Response) -> Dict[str, Any]:
+async def start_run(payload: StartRunRequest, response: Response) -> dict[str, Any]:
     config = RunnerConfig(
         ticker=payload.ticker,
         analysis_date=payload.analysis_date,
@@ -173,12 +164,12 @@ async def start_run(payload: StartRunRequest, response: Response) -> Dict[str, A
 
 
 @router.get("/api/runs")
-def list_runs() -> Dict[str, Any]:
+def list_runs() -> dict[str, Any]:
     return {"runs": registry.list_runs()}
 
 
 @router.get("/api/runs/{run_id}")
-def get_run(run_id: str) -> Dict[str, Any]:
+def get_run(run_id: str) -> dict[str, Any]:
     record = registry.get(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -189,7 +180,7 @@ def get_run(run_id: str) -> Dict[str, Any]:
 
 
 @router.delete("/api/runs/{run_id}")
-def cancel_run(run_id: str) -> Dict[str, Any]:
+def cancel_run(run_id: str) -> dict[str, Any]:
     """Request cancellation of a queued or running analysis.
 
     Returns the *response* status, which is one of:
@@ -232,10 +223,8 @@ async def stream_run(websocket: WebSocket, run_id: str) -> None:
         pass
     finally:
         registry.unsubscribe(run_id, queue)
-        try:
+        with suppress(Exception):
             await websocket.close()
-        except Exception:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +233,12 @@ async def stream_run(websocket: WebSocket, run_id: str) -> None:
 
 
 @router.get("/api/reports")
-def reports_index(include_incomplete: bool = Query(False)) -> Dict[str, Any]:
+def reports_index(include_incomplete: bool = Query(False)) -> dict[str, Any]:
     return {"reports": list_reports(include_incomplete=include_incomplete)}
 
 
 @router.get("/api/reports/{folder}")
-def report_detail(folder: str) -> Dict[str, Any]:
+def report_detail(folder: str) -> dict[str, Any]:
     report = get_report(folder)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -257,7 +246,7 @@ def report_detail(folder: str) -> Dict[str, Any]:
 
 
 @router.get("/api/reports/{folder}/decision")
-def report_decision(folder: str) -> Dict[str, Any]:
+def report_decision(folder: str) -> dict[str, Any]:
     """Return the structured PortfolioDecision JSON for a report.
 
     404s when the report has no ``decision.json`` (legacy runs predating the

@@ -1,5 +1,4 @@
 import os
-from typing import Dict, List, Tuple
 
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
@@ -12,10 +11,10 @@ _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 # ---------------------------------------------------------------------------
 
 # Canonical order analysts run / are displayed in.
-ANALYST_ORDER: List[str] = ["market", "social", "news", "fundamentals"]
+ANALYST_ORDER: list[str] = ["market", "social", "news", "fundamentals"]
 
 # Analyst key -> human-readable agent name used in event streams and CLI UI.
-ANALYST_DISPLAY_NAMES: Dict[str, str] = {
+ANALYST_DISPLAY_NAMES: dict[str, str] = {
     "market": "Market Analyst",
     "social": "Sentiment Analyst",
     "news": "News Analyst",
@@ -23,7 +22,7 @@ ANALYST_DISPLAY_NAMES: Dict[str, str] = {
 }
 
 # Analyst key -> AgentState report-section key holding that analyst's output.
-ANALYST_REPORT_MAP: Dict[str, str] = {
+ANALYST_REPORT_MAP: dict[str, str] = {
     "market": "market_report",
     "social": "sentiment_report",
     "news": "news_report",
@@ -31,7 +30,7 @@ ANALYST_REPORT_MAP: Dict[str, str] = {
 }
 
 # Fixed (non-user-selectable) teams and their agents, in execution order.
-FIXED_AGENTS: Dict[str, List[str]] = {
+FIXED_AGENTS: dict[str, list[str]] = {
     "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
     "Trading Team": ["Trader"],
     "Risk Management": [
@@ -45,7 +44,7 @@ FIXED_AGENTS: Dict[str, List[str]] = {
 
 # Report section -> (analyst_key controlling inclusion, finalizing agent name).
 # analyst_key=None means the section is always included.
-REPORT_SECTIONS: Dict[str, Tuple] = {
+REPORT_SECTIONS: dict[str, tuple] = {
     "market_report": ("market", "Market Analyst"),
     "sentiment_report": ("social", "Sentiment Analyst"),
     "news_report": ("news", "News Analyst"),
@@ -155,12 +154,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "oil commodities supply chain energy",
     ],
     # Data vendor configuration
-    # Category-level configuration (default for all tools in category)
+    # Category-level configuration (default for all tools in category).
+    # The configured value is the exact vendor chain — requests are NOT silently
+    # routed to vendors you didn't choose. For ordered fallback, list several,
+    # e.g. "yfinance,alpha_vantage". "default" uses all available vendors.
     "data_vendors": {
         "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
         "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
         "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
+        "prediction_markets": "polymarket",  # Options: polymarket (keyless)
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

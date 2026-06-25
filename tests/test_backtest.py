@@ -78,6 +78,24 @@ def test_summary_headline_metrics():
     assert s["max_drawdown"] == pytest.approx(-0.04)
 
 
+def test_max_drawdown_is_chronological_not_ticker_order():
+    """Drawdown must walk dates chronologically (aggregating same-date calls),
+    not the per-ticker input order — otherwise it depends on the order the user
+    passed tickers."""
+    rows_ab = [
+        _row("AAA", "2025-01-02", "Buy", "high", 0.10),
+        _row("AAA", "2025-02-03", "Buy", "high", -0.20),
+        _row("BBB", "2025-01-02", "Buy", "high", 0.05),
+        _row("BBB", "2025-02-03", "Buy", "high", -0.01),
+    ]
+    rows_ba = [rows_ab[2], rows_ab[3], rows_ab[0], rows_ab[1]]
+
+    mdd_ab = backtest.summarize(rows_ab)["max_drawdown"]
+    # by date: 01-02 -> +.15, 02-03 -> -.21; cum [.15, -.06]; drawdown -0.21.
+    assert mdd_ab == pytest.approx(-0.21)
+    assert backtest.summarize(rows_ba)["max_drawdown"] == pytest.approx(mdd_ab)
+
+
 def test_calibration_table():
     s = backtest.summarize(SAMPLE_ROWS)
     cal = {(b["rating"], b["confidence"]): b for b in s["calibration"]}
@@ -175,6 +193,71 @@ def test_run_backtest_skips_failing_point(tmp_path):
     assert len(rows) == len(dates) - 1
     # Nothing about the failure was written to disk (so a re-run retries it).
     assert len(backtest._load_existing(results_path)) == len(rows)
+
+
+def test_run_backtest_retries_unresolved_outcome(tmp_path):
+    """A point whose outcome can't be resolved yet (alpha_return None) is not
+    persisted, so a later run retries it instead of treating it as done."""
+    results_path = tmp_path / "results.jsonl"
+    calls = []
+    state = {"resolved": False}
+
+    def run_point(ticker, date, *, selected_analysts, config, holding_days):
+        calls.append((ticker, date))
+        alpha = 0.05 if state["resolved"] else None  # unavailable on first pass
+        return _row(ticker, date, "Buy", "high", alpha, holding=holding_days)
+
+    rows1 = backtest.run_backtest(
+        ["AAPL"], "2025-01-01", "2025-01-10",
+        cadence_days=40, holding_days=5,
+        results_path=results_path, run_point=run_point,
+    )
+    n = len(calls)
+    assert n >= 1
+    assert rows1 == []  # unresolved -> not returned
+    assert backtest._load_existing(results_path) == []  # and not persisted
+
+    # Data now available: the same points are retried (not skipped) and persisted.
+    state["resolved"] = True
+    calls.clear()
+    rows2 = backtest.run_backtest(
+        ["AAPL"], "2025-01-01", "2025-01-10",
+        cadence_days=40, holding_days=5,
+        results_path=results_path, run_point=run_point,
+    )
+    assert len(calls) == n  # retried, not skipped-forever
+    assert len(rows2) == n and all(r["alpha_return"] == 0.05 for r in rows2)
+
+
+def test_isolated_config_isolates_state_and_guards_lookahead(tmp_path):
+    cfg = backtest._isolated_config(
+        {"memory_log_path": "/real/log.md", "results_dir": "/real/results"},
+        tmp_path,
+    )
+    assert cfg["memory_log_path"] is None  # no-memory eval mode
+    assert cfg["disable_lookahead_tools"] is True  # live "now" tools neutralized
+    assert cfg["checkpoint_enabled"] is False
+    assert str(tmp_path) in cfg["results_dir"]
+    assert str(tmp_path) in cfg["data_cache_dir"]
+
+
+def test_lookahead_guard_disables_live_tools():
+    """With the eval guard set, the two 'now'-reading tools return a sentinel
+    instead of leaking current price / market odds into a historical date."""
+    from tradingagents.agents.utils.core_stock_tools import get_live_quote
+    from tradingagents.agents.utils.prediction_markets_tools import (
+        get_prediction_markets,
+    )
+    from tradingagents.dataflows.config import set_config
+
+    try:
+        set_config({"disable_lookahead_tools": True})
+        assert "disabled" in get_live_quote.invoke({"symbol": "AAPL"}).lower()
+        assert "disabled" in get_prediction_markets.invoke(
+            {"topic": "Fed rate cut"}
+        ).lower()
+    finally:
+        set_config({"disable_lookahead_tools": False})
 
 
 def test_render_report_smoke():

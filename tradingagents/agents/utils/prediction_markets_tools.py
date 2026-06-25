@@ -2,6 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.interface import route_to_vendor
 
 
@@ -28,4 +29,14 @@ def get_prediction_markets(
     Returns:
         str: A formatted markdown report of matching prediction markets
     """
+    # Polymarket odds are live ("now") regardless of the analysis date, so in a
+    # historical backtest they leak current market-implied probabilities into a
+    # past date. Disabled in evaluation mode (see backtest.py).
+    if get_config().get("disable_lookahead_tools"):
+        return (
+            "DATA_UNAVAILABLE: live prediction-market odds are disabled in "
+            "backtest/evaluation mode (they read current probabilities, which "
+            "leak the future on a historical date). Proceed without "
+            "prediction-market signal."
+        )
     return route_to_vendor("get_prediction_markets", topic, limit)

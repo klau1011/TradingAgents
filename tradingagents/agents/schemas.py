@@ -200,6 +200,14 @@ class PortfolioDecision(BaseModel):
             "Underweight / Sell, picked based on the analysts' debate."
         ),
     )
+    confidence: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        description=(
+            "Confidence in this rating given the strength of the evidence and how "
+            "much the risk analysts agreed. Use 'low' when the debate was unresolved "
+            "or evidence was thin, 'high' when the case is strong and corroborated."
+        ),
+    )
     executive_summary: str = Field(
         description=(
             "A concise action plan covering entry strategy, position sizing, "
@@ -238,6 +246,8 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     """
     parts = [
         f"**Rating**: {decision.rating.value}",
+        "",
+        f"**Confidence**: {decision.confidence}",
         "",
         f"**Executive Summary**: {decision.executive_summary}",
         "",

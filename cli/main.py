@@ -1241,25 +1241,150 @@ def run_analysis(checkpoint: bool | None = None):
         display_complete_report(final_state)
 
 
-@app.command()
-def analyze(
-    checkpoint: bool | None = typer.Option(
-        None,
-        "--checkpoint/--no-checkpoint",
-        help="Enable/disable checkpoint-resume (save state after each node so a "
-        "crashed run can resume). Omit to honor TRADINGAGENTS_CHECKPOINT_ENABLED.",
-    ),
-    clear_checkpoints: bool = typer.Option(
-        False,
-        "--clear-checkpoints",
-        help="Delete all saved checkpoints before running (force fresh start).",
-    ),
-):
+# Shared so the bare-invocation callback and the explicit `analyze` command
+# expose identical flags without duplicating the help text.
+_CHECKPOINT_OPT = typer.Option(
+    None,
+    "--checkpoint/--no-checkpoint",
+    help="Enable/disable checkpoint-resume (save state after each node so a "
+    "crashed run can resume). Omit to honor TRADINGAGENTS_CHECKPOINT_ENABLED.",
+)
+_CLEAR_CHECKPOINTS_OPT = typer.Option(
+    False,
+    "--clear-checkpoints",
+    help="Delete all saved checkpoints before running (force fresh start).",
+)
+# Module-level singleton so the variadic argument default doesn't trip ruff B008
+# (function call in argument default); same reason as the option singletons above.
+_TICKERS_ARG = typer.Argument(..., help="One or more tickers, e.g. AAPL MSFT 0700.HK")
+
+
+def _run_analyze(checkpoint: bool | None, clear_checkpoints: bool) -> None:
     if clear_checkpoints:
         from tradingagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     run_analysis(checkpoint=checkpoint)
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    checkpoint: bool | None = _CHECKPOINT_OPT,
+    clear_checkpoints: bool = _CLEAR_CHECKPOINTS_OPT,
+):
+    """TradingAgents CLI. Run with no command to start the interactive analysis."""
+    # Only run the interactive flow for bare `tradingagents`; named subcommands
+    # (analyze, evaluate) handle themselves.
+    if ctx.invoked_subcommand is None:
+        _run_analyze(checkpoint, clear_checkpoints)
+
+
+@app.command()
+def analyze(
+    checkpoint: bool | None = _CHECKPOINT_OPT,
+    clear_checkpoints: bool = _CLEAR_CHECKPOINTS_OPT,
+):
+    """Interactive analysis (same as running `tradingagents` with no command)."""
+    _run_analyze(checkpoint, clear_checkpoints)
+
+
+@app.command()
+def evaluate(
+    tickers: list[str] = _TICKERS_ARG,
+    from_date: str = typer.Option(..., "--from", help="Backtest start date, YYYY-MM-DD."),
+    to_date: str = typer.Option(..., "--to", help="Backtest end date, YYYY-MM-DD."),
+    cadence_days: int = typer.Option(
+        21, "--cadence-days",
+        help="Business days between sampled trade dates (~21 = monthly).",
+    ),
+    holding_days: int = typer.Option(
+        5, "--holding-days",
+        help="Forward window (trading days) for the realized return/alpha outcome.",
+    ),
+    analysts: str = typer.Option(
+        "market,news,fundamentals", "--analysts",
+        help="Comma-separated analysts. Default excludes 'social' to avoid "
+        "look-ahead leakage from StockTwits/Reddit.",
+    ),
+    include_social: bool = typer.Option(
+        False, "--include-social",
+        help="Add the social/sentiment analyst (WARNING: leaks 'now' social data "
+        "into historical dates).",
+    ),
+    out: str | None = typer.Option(
+        None, "--out",
+        help="Output directory (default ~/.tradingagents/backtests/<stamp>/).",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the cost-confirmation prompt."),
+):
+    """Backtest the analysis: score ratings vs forward alpha over a date range."""
+    from datetime import datetime
+    from pathlib import Path
+
+    from tradingagents.backtest import (
+        render_report,
+        run_backtest,
+        sample_dates,
+        summarize,
+    )
+
+    selected = [a.strip().lower() for a in analysts.split(",") if a.strip()]
+    if include_social and "social" not in selected:
+        selected.append("social")
+    if "social" in selected:
+        console.print(
+            "[yellow]WARNING:[/yellow] the social analyst reads 'now' (StockTwits/"
+            "Reddit), which leaks future information into historical backtest dates."
+        )
+
+    dates = sample_dates(from_date, to_date, cadence_days)
+    if not dates:
+        console.print("[red]No business days in the given range.[/red]")
+        raise typer.Exit(1)
+    n_points = len(tickers) * len(dates)
+
+    if out:
+        out_dir = Path(out)
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path.home() / ".tradingagents" / "backtests" / stamp
+    results_path = out_dir / "results.jsonl"
+
+    console.print(
+        f"[bold]{n_points}[/bold] evaluation points "
+        f"({len(tickers)} ticker(s) × {len(dates)} dates) — analysts: {', '.join(selected)}."
+    )
+    console.print(
+        "[yellow]Each point is a full multi-agent LLM run (minutes and $ each).[/yellow]"
+    )
+    if not yes and not typer.confirm("Proceed?", default=False):
+        raise typer.Abort()
+
+    rows = run_backtest(
+        tickers, from_date, to_date,
+        cadence_days=cadence_days,
+        holding_days=holding_days,
+        selected_analysts=selected,
+        config=DEFAULT_CONFIG.copy(),
+        results_path=results_path,
+    )
+
+    report = render_report(
+        summarize(rows),
+        meta={
+            "tickers": ", ".join(tickers),
+            "range": f"{from_date} -> {to_date}",
+            "cadence_days": cadence_days,
+            "holding_days": holding_days,
+            "analysts": ", ".join(selected),
+        },
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "report.md").write_text(report, encoding="utf-8")
+    console.print()
+    console.print(report)
+    console.print(f"\n[green]Saved:[/green] {results_path}  |  {out_dir / 'report.md'}")
 
 
 if __name__ == "__main__":

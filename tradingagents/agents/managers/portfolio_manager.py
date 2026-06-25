@@ -61,7 +61,7 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts. State your confidence (low/medium/high) in the rating based on the strength of the evidence and how much the risk analysts agreed.{get_language_instruction()}"""
 
         final_trade_decision, decision_obj = invoke_structured_or_freetext_with_object(
             structured_llm,

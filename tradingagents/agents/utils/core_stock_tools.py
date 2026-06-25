@@ -2,6 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.interface import route_to_vendor
 
 
@@ -37,4 +38,15 @@ def get_live_quote(
     Returns:
         str: A formatted snapshot of the current quote.
     """
+    # A live quote reads "now" regardless of the analysis date, so in a
+    # historical backtest it would reveal the future price. Disabled in
+    # evaluation mode (see backtest.py); use get_stock_data /
+    # get_verified_market_snapshot, which are bounded by the trade date.
+    if get_config().get("disable_lookahead_tools"):
+        return (
+            "DATA_UNAVAILABLE: live quote is disabled in backtest/evaluation mode "
+            "(it reads the current price, which leaks the future on a historical "
+            "date). Use get_stock_data or get_verified_market_snapshot bounded by "
+            "the trade date instead."
+        )
     return route_to_vendor("get_live_quote", symbol)

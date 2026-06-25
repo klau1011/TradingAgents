@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 # "social" (StockTwits/Reddit) returns "now" content regardless of the trade
 # date, so including it in a historical backtest leaks future information. The
 # other three analysts are date-bounded (price/indicators pinned to the trade
-# date; yfinance news is start/end bounded), so they are the safe default.
+# date; yfinance news is start/end bounded) EXCEPT for two tools that read
+# "now" — get_live_quote (market) and get_prediction_markets (news). Those are
+# neutralized via the ``disable_lookahead_tools`` config flag set in
+# ``_isolated_config`` below, which is what actually makes this default safe.
 LOOKAHEAD_SAFE_ANALYSTS = ("market", "news", "fundamentals")
 
 _LONG = {"buy", "overweight"}
@@ -131,6 +134,16 @@ def summarize(rows: list[dict]) -> dict:
     strat = [_direction(r["rating"]) * r["alpha_return"] for r in directional]
     raws = [r["raw_return"] for r in directional if r.get("raw_return") is not None]
 
+    # Drawdown is path-dependent, so it must be chronological — the input/JSONL
+    # order is per-ticker, which would make a multi-ticker drawdown depend on
+    # ticker argument order. Aggregate same-date calls (equal weight) into one
+    # cumulative step and walk by date. (Hit-rate/mean/Sharpe above are
+    # order-independent, so they stay on the raw per-call series.)
+    by_date: dict[str, float] = defaultdict(float)
+    for r, s in zip(directional, strat, strict=True):
+        by_date[r["date"]] += s
+    dd_series = [by_date[d] for d in sorted(by_date)]
+
     return {
         "n_total": n_total,
         "n_resolved": len(resolved),
@@ -140,7 +153,7 @@ def summarize(rows: list[dict]) -> dict:
         "mean_alpha": (sum(strat) / len(strat)) if strat else None,
         "mean_raw": (sum(raws) / len(raws)) if raws else None,
         "signal_sharpe": _sharpe(strat, directional),
-        "max_drawdown": _max_drawdown(strat),
+        "max_drawdown": _max_drawdown(dd_series),
         "calibration": _calibration(resolved),
     }
 
@@ -236,6 +249,33 @@ def _run_point_llm(
     }
 
 
+def _isolated_config(config: dict | None, out_dir: Path) -> dict:
+    """Config for an evaluation run: isolated state + look-ahead guard.
+
+    A backtest must not touch live state. Without this, every point would
+    read/write the user's real memory log (storing historical decisions and
+    feeding eval-generated reflections into later live *and* backtest runs) and
+    write graph logs/caches under the user's results dir. So:
+
+    - ``memory_log_path=None`` → no-memory eval mode: each point is an
+      independent measurement (TradingMemoryLog no-ops when the path is unset).
+    - ``results_dir``/``data_cache_dir`` redirected under the backtest output.
+    - ``checkpoint_enabled=False`` → no per-point checkpoint churn.
+    - ``disable_lookahead_tools=True`` → neutralizes the "now"-reading tools
+      (get_live_quote, get_prediction_markets) that the date-bounded default
+      analysts can otherwise call.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    cfg = dict(config if config is not None else DEFAULT_CONFIG)
+    cfg["memory_log_path"] = None
+    cfg["results_dir"] = str(out_dir / "graph_logs")
+    cfg["data_cache_dir"] = str(out_dir / "cache")
+    cfg["checkpoint_enabled"] = False
+    cfg["disable_lookahead_tools"] = True
+    return cfg
+
+
 def run_backtest(
     tickers: Sequence[str],
     start: str,
@@ -251,11 +291,12 @@ def run_backtest(
     """Evaluate the system over ``tickers`` across [start, end].
 
     Appends one JSONL row per evaluated (ticker, date) to ``results_path`` and
-    skips any point already recorded there, so a killed run resumes for free.
+    skips any point already *resolved* there, so a killed run resumes for free.
     ``run_point`` is injected in tests; production uses the LLM pipeline.
     """
     results_path = Path(results_path)
     dates = sample_dates(start, end, cadence_days)
+    eval_config = _isolated_config(config, results_path.parent)
 
     if holding_days > cadence_days:
         logger.warning(
@@ -263,7 +304,13 @@ def run_backtest(
             "which inflates Sharpe and drawdown.", holding_days, cadence_days,
         )
 
-    rows = _load_existing(results_path)
+    # Only points with a *resolved* outcome are complete. An unresolved row
+    # (price data too recent or a transient fetch failure) must not look done
+    # forever, or its outcome would never be retried once data arrives — so we
+    # drop unresolved rows from both the resume set and the report and re-run
+    # them below. (New runs never persist unresolved rows; this guards files
+    # left by an interrupted older run.)
+    rows = [r for r in _load_existing(results_path) if r.get("alpha_return") is not None]
     done = {_key(r["ticker"], r["date"]) for r in rows}
     runner = run_point or _run_point_llm
 
@@ -271,7 +318,7 @@ def run_backtest(
         1 for t in tickers for d in dates if _key(t, d) in done
     )
     if skipped:
-        logger.info("Resuming: skipping %d already-evaluated points.", skipped)
+        logger.info("Resuming: skipping %d already-resolved points.", skipped)
 
     for ticker in tickers:
         for date in dates:
@@ -281,7 +328,7 @@ def run_backtest(
                 row = runner(
                     ticker, date,
                     selected_analysts=selected_analysts,
-                    config=config,
+                    config=eval_config,
                     holding_days=holding_days,
                 )
             except Exception as e:
@@ -289,6 +336,17 @@ def run_backtest(
                 # expensive multi-point sweep. Don't persist it, so a re-run
                 # retries it while the completed points are skipped.
                 logger.warning("Skipping %s on %s: %s", ticker, date, e)
+                continue
+            if row.get("alpha_return") is None:
+                # Decision ran but the forward outcome isn't resolvable yet
+                # (too recent) or the price fetch failed. Treat like a failure:
+                # don't persist, so a later run retries it. (ponytail: this
+                # re-runs the LLM on retry; acceptable since historical
+                # backtests resolve first try and only the recent edge hits it.)
+                logger.warning(
+                    "Outcome unresolved for %s on %s; not persisting so a later "
+                    "run retries it.", ticker, date,
+                )
                 continue
             _append_row(results_path, row)
             rows.append(row)

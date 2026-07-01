@@ -3,9 +3,10 @@
 This is a *signal evaluation*, not a portfolio simulation. It measures whether the
 Portfolio Manager's rating predicts forward alpha vs the per-market benchmark.
 
-# ponytail: signal-eval only — no position sizing, transaction costs, or
-# overlapping-position netting. Add those only if/when the "sized decisions"
-# track lands; they are a different problem from "does the rating predict alpha".
+# ponytail: signal-eval only — no position simulation or overlapping-position
+# netting. A flat per-call transaction cost and confidence-based weighting are
+# supported; a real portfolio simulator is a different problem from "does the
+# rating predict alpha".
 
 Reuses the already-built outcome math on ``TradingAgentsGraph``
 (``_fetch_returns`` / ``_resolve_benchmark``) and the structured decision it
@@ -18,43 +19,41 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pandas as pd
 
+from tradingagents.agents.utils.rating import direction as _direction
+
 logger = logging.getLogger(__name__)
 
 # "social" (StockTwits/Reddit) returns "now" content regardless of the trade
 # date, so including it in a historical backtest leaks future information. The
 # other three analysts are date-bounded (price/indicators pinned to the trade
-# date; yfinance news is start/end bounded) EXCEPT for two tools that read
-# "now" — get_live_quote (market) and get_prediction_markets (news). Those are
-# neutralized via the ``disable_lookahead_tools`` config flag set in
-# ``_isolated_config`` below, which is what actually makes this default safe.
+# date; yfinance news is start/end bounded; statement fundamentals filtered by
+# curr_date) EXCEPT for the tools that read "now" — get_live_quote (market),
+# get_prediction_markets (news), get_fundamentals and
+# get_analyst_recommendations (fundamentals), and get_insider_transactions
+# (news). Those are neutralized via the ``disable_lookahead_tools`` config
+# flag set in ``_isolated_config`` below, which is what actually makes this
+# default safe. (Residual: the ETF profile tools still read "now"; guard them
+# the same way if ETF backtests become a real use case.)
 LOOKAHEAD_SAFE_ANALYSTS = ("market", "news", "fundamentals")
-
-_LONG = {"buy", "overweight"}
-_SHORT = {"sell", "underweight"}
 
 _RATING_ORDER = {"Buy": 0, "Overweight": 1, "Hold": 2, "Underweight": 3, "Sell": 4}
 _CONF_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+# Position weight per confidence level for the confidence-weighted metric.
+_CONF_WEIGHT = {"low": 0.5, "medium": 1.0, "high": 1.5}
+_N_RANDOM_TRIALS = 1000
 
 
 # ---------------------------------------------------------------------------
 # Pure helpers (no LLM, no network) — these are what the tests exercise.
 # ---------------------------------------------------------------------------
-
-
-def _direction(rating: str | None) -> int:
-    """Map a 5-tier rating to a position direction: +1 long, -1 short, 0 flat."""
-    r = (rating or "").strip().lower()
-    if r in _LONG:
-        return 1
-    if r in _SHORT:
-        return -1
-    return 0
 
 
 def sample_dates(start: str, end: str, cadence_days: int) -> list[str]:
@@ -126,12 +125,79 @@ def _calibration(resolved: list[dict]) -> list[dict]:
     return out
 
 
-def summarize(rows: list[dict]) -> dict:
-    """Aggregate result rows into headline metrics + a calibration table."""
+def _baselines(resolved: list[dict], *, cost: float, seed: int) -> dict:
+    """Null strategies over the same resolved points.
+
+    The signal has to beat these to be worth anything: buy-and-hold of the
+    evaluated names (raw), always-Buy (alpha), and random ±1 direction (alpha
+    distribution over ``_N_RANDOM_TRIALS`` seeded trials). Cost is charged per
+    call for the directional baselines, same as the strategy.
+    """
+    if not resolved:
+        return {"buy_hold_raw": None, "always_buy_alpha": None,
+                "random_alpha_mean": None, "random_alpha_std": None}
+    raws = [r["raw_return"] for r in resolved if r.get("raw_return") is not None]
+    alphas = [r["alpha_return"] for r in resolved]
+    rng = random.Random(seed)
+    trial_means = [
+        sum(rng.choice((1, -1)) * a - cost for a in alphas) / len(alphas)
+        for _ in range(_N_RANDOM_TRIALS)
+    ]
+    mean_t = sum(trial_means) / len(trial_means)
+    std_t = math.sqrt(
+        sum((x - mean_t) ** 2 for x in trial_means) / (len(trial_means) - 1)
+    )
+    return {
+        "buy_hold_raw": (sum(raws) / len(raws)) if raws else None,
+        "always_buy_alpha": sum(a - cost for a in alphas) / len(alphas),
+        "random_alpha_mean": mean_t,
+        "random_alpha_std": std_t,
+    }
+
+
+def _by_confidence(directional: list[dict], strat: list[float]) -> list[dict]:
+    """Per confidence level over directional calls: n, hit-rate, mean captured alpha."""
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for r, s in zip(directional, strat, strict=True):
+        buckets[r.get("confidence") or "medium"].append(s)
+    out = [
+        {
+            "confidence": conf,
+            "n": len(ss),
+            "hit_rate": sum(1 for s in ss if s > 0) / len(ss),
+            "mean_alpha": sum(ss) / len(ss),
+        }
+        for conf, ss in buckets.items()
+    ]
+    out.sort(key=lambda b: _CONF_ORDER.get(b["confidence"], 99))
+    return out
+
+
+def _confidence_weighted_alpha(directional: list[dict], strat: list[float]) -> float | None:
+    """Mean captured alpha with positions scaled by confidence (0.5/1.0/1.5).
+
+    Cost is already inside ``strat``, so scaling a call scales its cost too —
+    consistent with sizing the actual position.
+    """
+    if not directional:
+        return None
+    weights = [
+        _CONF_WEIGHT.get(r.get("confidence") or "medium", 1.0) for r in directional
+    ]
+    return sum(w * s for w, s in zip(weights, strat, strict=True)) / sum(weights)
+
+
+def summarize(rows: list[dict], *, cost: float = 0.0, seed: int = 7) -> dict:
+    """Aggregate result rows into headline metrics + calibration and baselines.
+
+    ``cost`` is a flat round-trip transaction cost as a return fraction (e.g.
+    0.001 = 10 bps), charged once per directional call (Hold trades nothing).
+    It flows into every strategy metric and the directional baselines.
+    """
     n_total = len(rows)
     resolved = [r for r in rows if r.get("alpha_return") is not None]
     directional = [r for r in resolved if _direction(r["rating"]) != 0]
-    strat = [_direction(r["rating"]) * r["alpha_return"] for r in directional]
+    strat = [_direction(r["rating"]) * r["alpha_return"] - cost for r in directional]
     raws = [r["raw_return"] for r in directional if r.get("raw_return") is not None]
 
     # Drawdown is path-dependent, so it must be chronological — the input/JSONL
@@ -149,11 +215,15 @@ def summarize(rows: list[dict]) -> dict:
         "n_resolved": len(resolved),
         "n_directional": len(directional),
         "coverage": (len(resolved) / n_total) if n_total else None,
+        "cost": cost,
         "hit_rate": (sum(1 for s in strat if s > 0) / len(strat)) if strat else None,
         "mean_alpha": (sum(strat) / len(strat)) if strat else None,
         "mean_raw": (sum(raws) / len(raws)) if raws else None,
         "signal_sharpe": _sharpe(strat, directional),
         "max_drawdown": _max_drawdown(dd_series),
+        "confidence_weighted_alpha": _confidence_weighted_alpha(directional, strat),
+        "baselines": _baselines(resolved, cost=cost, seed=seed),
+        "by_confidence": _by_confidence(directional, strat),
         "calibration": _calibration(resolved),
     }
 
@@ -171,20 +241,45 @@ def render_report(summary: dict, *, meta: dict | None = None) -> str:
     lines = ["# Backtest report", ""]
     if meta:
         lines += [f"- {k}: {v}" for k, v in meta.items()] + [""]
+    base = summary["baselines"]
     lines += [
         "> Signal evaluation, not a portfolio simulation: rating direction vs "
-        "forward alpha, equal weight, no sizing/costs. The social (sentiment) "
-        "analyst is excluded unless `--include-social` was passed, because its "
+        "forward alpha, equal weight per call. The social (sentiment) analyst "
+        "is excluded unless `--include-social` was passed, because its "
         "StockTwits/Reddit sources read 'now' and leak into historical dates. "
-        "Residual leakage (restated fundamentals, news recency) may remain.",
+        "Other 'now'-reading tools (live quote, prediction markets, "
+        "fundamentals overview, analyst recommendations, insider transactions) "
+        "are disabled in evaluation mode; ETF profile data may still read "
+        "'now'.",
         "",
         f"- points: {summary['n_total']}   resolved: {summary['n_resolved']}   "
         f"coverage: {_pct(summary['coverage'])}",
         f"- directional calls: {summary['n_directional']}",
+        f"- transaction cost per directional call: {_pct(summary['cost'])}",
         f"- Hit-rate: {_num(summary['hit_rate'])}",
         f"- Mean captured alpha: {_pct(summary['mean_alpha'])}",
+        f"- Confidence-weighted alpha: {_pct(summary['confidence_weighted_alpha'])}",
         f"- Signal Sharpe (annualized): {_num(summary['signal_sharpe'])}",
         f"- Max drawdown (cumulative alpha): {_pct(summary['max_drawdown'])}",
+        "",
+        "## Baselines (same points, no signal)",
+        "",
+        f"- Buy & hold (raw return): {_pct(base['buy_hold_raw'])}",
+        f"- Always-Buy (alpha): {_pct(base['always_buy_alpha'])}",
+        f"- Random ±1 (alpha, mean ± std over {_N_RANDOM_TRIALS} trials): "
+        f"{_pct(base['random_alpha_mean'])} ± {_pct(base['random_alpha_std'])}",
+        "",
+        "## By confidence (directional calls)",
+        "",
+        "| Confidence | n | Hit-rate | Mean alpha |",
+        "| --- | --- | --- | --- |",
+    ]
+    for b in summary["by_confidence"]:
+        lines.append(
+            f"| {b['confidence']} | {b['n']} | "
+            f"{_num(b['hit_rate'])} | {_pct(b['mean_alpha'])} |"
+        )
+    lines += [
         "",
         "## Calibration (rating × confidence)",
         "",
@@ -262,8 +357,9 @@ def _isolated_config(config: dict | None, out_dir: Path) -> dict:
     - ``results_dir``/``data_cache_dir`` redirected under the backtest output.
     - ``checkpoint_enabled=False`` → no per-point checkpoint churn.
     - ``disable_lookahead_tools=True`` → neutralizes the "now"-reading tools
-      (get_live_quote, get_prediction_markets) that the date-bounded default
-      analysts can otherwise call.
+      (get_live_quote, get_prediction_markets, get_fundamentals,
+      get_analyst_recommendations, get_insider_transactions) that the
+      date-bounded default analysts can otherwise call.
     """
     from tradingagents.default_config import DEFAULT_CONFIG
 

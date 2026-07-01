@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
+import logging
 import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any
 
+from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.runner import AnalysisRunner, RunCancelled, RunnerConfig
 from tradingagents.runner_events import (
     MessageEvent,
@@ -25,10 +28,16 @@ from tradingagents.runner_events import (
     event_to_dict,
 )
 
+logger = logging.getLogger(__name__)
+
 MAX_CONCURRENT_RUNS = 3
 MAX_RECENT_RUNS = 50
 EVENT_BUFFER_SIZE = 500
 SUBSCRIBER_QUEUE_SIZE = 1000
+
+
+def _web_runs_dir() -> Path:
+    return Path(DEFAULT_CONFIG["results_dir"]) / "web_runs"
 
 
 @dataclass
@@ -40,28 +49,29 @@ class RunRecord:
     # "cancelling" value (returned by ``DELETE /api/runs/{id}``) is *never*
     # stored here — it lives only in the HTTP response.
     status: str = "queued"  # queued | running | done | error | cancelled
-    queue_position: Optional[int] = None
+    queue_position: int | None = None
     created_at: str = field(
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
     )
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
-    decision: Optional[str] = None
-    report_path: Optional[str] = None
-    error: Optional[str] = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    decision: str | None = None
+    report_path: str | None = None
+    report_folder: str | None = None
+    error: str | None = None
 
     # Internal: bounded event log + live subscribers
-    events: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER_SIZE))
-    subscribers: List[asyncio.Queue] = field(default_factory=list)
+    events: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=EVENT_BUFFER_SIZE))
+    subscribers: list[asyncio.Queue] = field(default_factory=list)
     # Cooperative cancel signal. Inspected by the AnalysisRunner's chunk loop
     # (worker thread) and by ``_execute`` before transitioning out of queued.
     # ``threading.Event`` is thread-safe and provides cross-thread visibility
     # so the cancel can be requested from the FastAPI threadpool while the
     # run executes in a different threadpool worker.
     cancel_event: threading.Event = field(default_factory=threading.Event)
-    task: Optional[asyncio.Task] = None
+    task: asyncio.Task | None = None
 
-    def to_summary(self) -> Dict[str, Any]:
+    def to_summary(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "ticker": self.config.ticker,
@@ -73,6 +83,7 @@ class RunRecord:
             "finished_at": self.finished_at,
             "decision": self.decision,
             "report_path": self.report_path,
+            "report_folder": self.report_folder,
             "error": self.error,
         }
 
@@ -82,11 +93,57 @@ class RunRegistry:
 
     def __init__(self, max_concurrent: int = MAX_CONCURRENT_RUNS) -> None:
         self._max_concurrent = max_concurrent
-        self._semaphore: Optional[asyncio.Semaphore] = None
-        self._runs: Dict[str, RunRecord] = {}
-        self._order: Deque[str] = deque(maxlen=MAX_RECENT_RUNS)
+        self._semaphore: asyncio.Semaphore | None = None
+        self._runs: dict[str, RunRecord] = {}
+        self._order: deque[str] = deque(maxlen=MAX_RECENT_RUNS)
         self._lock = asyncio.Lock()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        # Terminal run summaries persisted on disk, loaded lazily. Keeps run
+        # history visible across server restarts (uvicorn --reload wipes the
+        # in-memory registry). Event buffers are not persisted.
+        self._persisted: dict[str, dict[str, Any]] | None = None
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+    # ponytail: JSON file per run, no locking — single-process server. Move to
+    # sqlite if multi-worker ever happens.
+
+    def _persist(self, record: RunRecord) -> None:
+        """Write a terminal run's summary to disk; never raises."""
+        try:
+            summary = record.to_summary()
+            runs_dir = _web_runs_dir()
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            path = runs_dir / f"{record.run_id}.json"
+            path.write_text(json.dumps(summary), encoding="utf-8")
+            if self._persisted is not None:
+                self._persisted[record.run_id] = summary
+            # Prune oldest files beyond the recent window.
+            files = sorted(
+                runs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+            )
+            for stale in files[MAX_RECENT_RUNS:]:
+                stale.unlink(missing_ok=True)
+                if self._persisted is not None:
+                    self._persisted.pop(stale.stem, None)
+        except OSError as exc:
+            logger.warning("Could not persist run %s: %s", record.run_id, exc)
+
+    def _load_persisted(self) -> dict[str, dict[str, Any]]:
+        if self._persisted is None:
+            self._persisted = {}
+            runs_dir = _web_runs_dir()
+            if runs_dir.exists():
+                for path in runs_dir.glob("*.json"):
+                    try:
+                        summary = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError) as exc:
+                        logger.warning("Skipping unreadable run file %s: %s", path, exc)
+                        continue
+                    if isinstance(summary, dict) and summary.get("run_id"):
+                        self._persisted[summary["run_id"]] = summary
+        return self._persisted
 
     def _ensure_semaphore(self) -> asyncio.Semaphore:
         if self._semaphore is None:
@@ -117,7 +174,7 @@ class RunRegistry:
         record.task = asyncio.create_task(self._execute(record))
         return record
 
-    def _compute_queue_position(self, record: RunRecord) -> Optional[int]:
+    def _compute_queue_position(self, record: RunRecord) -> int | None:
         queued_before = [
             r for r in self._runs.values()
             if r.status == "queued" and r.created_at < record.created_at
@@ -126,7 +183,7 @@ class RunRegistry:
 
     def _evict_overflow(self) -> None:
         # Drop terminal runs that fall outside the recent window
-        live_ids = {rid for rid in self._order}
+        live_ids = set(self._order)
         for rid in list(self._runs.keys()):
             if rid not in live_ids and self._runs[rid].status in {
                 "done",
@@ -135,7 +192,7 @@ class RunRegistry:
             }:
                 self._runs.pop(rid, None)
 
-    def cancel(self, run_id: str) -> Optional[str]:
+    def cancel(self, run_id: str) -> str | None:
         """Request cancellation of a run.
 
         This method is safe to invoke from any thread — the only state it
@@ -188,6 +245,7 @@ class RunRegistry:
                     ),
                 )
                 self._record_event(record, StatusEvent(status="cancelled"))
+                self._persist(record)
                 for q in list(record.subscribers):
                     self._close_subscriber(record, q)
                 return
@@ -213,6 +271,7 @@ class RunRegistry:
                 await loop.run_in_executor(None, runner.run)
                 record.status = "done"
                 record.report_path = str(runner.save_path / "complete_report.md")
+                record.report_folder = runner.save_path.name
                 # Pull decision from the latest done event if present
                 for ev in reversed(record.events):
                     if ev.get("type") == "done":
@@ -244,6 +303,7 @@ class RunRegistry:
                     self._record_event(
                         record, StatusEvent(status=record.status)  # type: ignore[arg-type]
                     )
+                self._persist(record)
                 # Close all subscriber queues so WS endpoints exit gracefully
                 for q in list(record.subscribers):
                     self._close_subscriber(record, q)
@@ -295,7 +355,7 @@ class RunRegistry:
         except Exception:
             pass
 
-    def subscribe(self, run_id: str) -> Optional[tuple]:
+    def subscribe(self, run_id: str) -> tuple | None:
         """Return ``(buffered_events, queue)`` for a run, or ``None``."""
         record = self._runs.get(run_id)
         if record is None:
@@ -313,11 +373,26 @@ class RunRegistry:
     # Queries
     # ------------------------------------------------------------------
 
-    def get(self, run_id: str) -> Optional[RunRecord]:
+    def get(self, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
 
-    def list_runs(self) -> List[Dict[str, Any]]:
-        return [self._runs[rid].to_summary() for rid in self._order if rid in self._runs]
+    def get_summary(self, run_id: str) -> dict[str, Any] | None:
+        """Summary for a live or persisted run (live wins)."""
+        record = self._runs.get(run_id)
+        if record is not None:
+            return record.to_summary()
+        return self._load_persisted().get(run_id)
+
+    def list_runs(self) -> list[dict[str, Any]]:
+        """Live + persisted run summaries, newest first, capped."""
+        merged = dict(self._load_persisted())
+        for rid in self._order:
+            if rid in self._runs:
+                merged[rid] = self._runs[rid].to_summary()
+        ordered = sorted(
+            merged.values(), key=lambda s: s.get("created_at") or "", reverse=True
+        )
+        return ordered[:MAX_RECENT_RUNS]
 
 
 registry = RunRegistry()

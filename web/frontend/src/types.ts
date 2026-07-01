@@ -38,6 +38,7 @@ export interface DoneEvent {
   decision: string;
   final_state_path: string | null;
   report_path: string | null;
+  report_folder: string | null;
   timestamp: string;
 }
 export interface ErrorEvent {
@@ -66,6 +67,7 @@ export interface RunSummary {
   finished_at: string | null;
   decision: string | null;
   report_path: string | null;
+  report_folder: string | null;
   error: string | null;
 }
 

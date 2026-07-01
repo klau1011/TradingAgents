@@ -7,7 +7,7 @@ chunks, so this runs without any LLM call or network access.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -23,10 +23,10 @@ from tradingagents.runner_events import (
 
 
 class _StubPropagator:
-    def create_initial_state(self, *args, **kwargs) -> Dict[str, Any]:
+    def create_initial_state(self, *args, **kwargs) -> dict[str, Any]:
         return {}
 
-    def get_graph_args(self, **kwargs) -> Dict[str, Any]:
+    def get_graph_args(self, **kwargs) -> dict[str, Any]:
         return {}
 
 
@@ -35,8 +35,7 @@ class _StubInnerGraph:
         self._chunks = chunks
 
     def stream(self, init_state, **kwargs):
-        for c in self._chunks:
-            yield c
+        yield from self._chunks
 
 
 class _StubGraph:
@@ -50,7 +49,7 @@ class _StubGraph:
         return "BUY"
 
 
-_FAKE_CHUNKS: List[Dict[str, Any]] = [
+_FAKE_CHUNKS: list[dict[str, Any]] = [
     {"messages": [], "market_report": "## Market\nlooks strong"},
     {"messages": [], "sentiment_report": "## Social\nbullish"},
     {"messages": [], "news_report": "## News\nneutral"},
@@ -106,7 +105,7 @@ def test_runner_emits_expected_event_sequence(tmp_path: Path) -> None:
     for e in events:
         if isinstance(e, AgentStatusEvent):
             final_status[e.agent] = e.status
-    for agent in ("Market Analyst", "Social Analyst", "News Analyst", "Fundamentals Analyst",
+    for agent in ("Market Analyst", "Sentiment Analyst", "News Analyst", "Fundamentals Analyst",
                   "Bull Researcher", "Bear Researcher", "Research Manager",
                   "Trader",
                   "Aggressive Analyst", "Conservative Analyst", "Neutral Analyst",
@@ -120,10 +119,43 @@ def test_runner_emits_expected_event_sequence(tmp_path: Path) -> None:
                      "trader_investment_plan", "final_trade_decision"):
         assert required in sections_seen
 
-    # Done event carries the decision and a report path
+    # Done event carries the decision, a report path, and the opaque folder
+    # reference the web UI links to
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert done and done[-1].decision == "BUY"
-    assert (runner.save_path / "complete_report.md").exists()
+    assert done[-1].report_folder == runner.save_path.name
+    report = runner.save_path / "complete_report.md"
+    assert report.exists()
+    report_text = report.read_text(encoding="utf-8")
+    assert "## Market\nlooks strong" in report_text
+    assert "PM says BUY" in report_text
+
+
+def test_runner_error_event_is_sanitized(tmp_path: Path) -> None:
+    """ErrorEvent messages are rendered verbatim in browsers, so they must
+    carry the exception summary only — no traceback / server internals."""
+    from tradingagents.runner_events import ErrorEvent
+
+    class _BoomInner:
+        def stream(self, init_state, **kwargs):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover
+
+    class _BoomGraph:
+        def __init__(self, *_, **__):
+            self.propagator = _StubPropagator()
+            self.graph = _BoomInner()
+
+    events: list = []
+    cfg = RunnerConfig(ticker="ERR", analysis_date="2025-01-02", analysts=["market"])
+    with patch.object(runner_mod, "TradingAgentsGraph", _BoomGraph):
+        runner = AnalysisRunner(config=cfg, on_event=events.append, save_dir=tmp_path)
+        with pytest.raises(RuntimeError):
+            runner.run()
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert errors and errors[-1].message == "RuntimeError: boom"
+    assert "Traceback" not in errors[-1].message
 
 
 def test_runner_dedups_repeat_status(tmp_path: Path) -> None:

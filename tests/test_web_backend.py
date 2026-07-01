@@ -8,6 +8,14 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolated_results_dir(tmp_path, monkeypatch):
+    """Keep run-summary persistence (results_dir/web_runs) out of real state."""
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path))
+
+
 @pytest.fixture()
 def client():
     from web.backend.app import app
@@ -75,6 +83,84 @@ def test_start_run_rejects_future_date(client) -> None:
         json={"ticker": "SPY", "analysis_date": "2099-01-02"},
     )
     assert r.status_code == 422
+
+
+def test_start_run_preflight_rejects_missing_api_key(client, monkeypatch) -> None:
+    """A missing provider key must fail at submission with a clear 400, not
+    mid-run with a runtime error."""
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    r = client.post(
+        "/api/runs",
+        json={"ticker": "SPY", "analysis_date": "2025-01-02"},
+    )
+    assert r.status_code == 400
+    assert "OPENAI_API_KEY" in r.json()["detail"]
+
+
+def test_start_run_preflight_allows_key_optional_provider(client, monkeypatch) -> None:
+    from web.backend import runs as runs_mod
+
+    async def fake_submit(config):
+        class Record:
+            run_id = "fake"
+
+            def to_summary(self):
+                return {"run_id": self.run_id, "ticker": config.ticker}
+
+        return Record()
+
+    monkeypatch.setattr(runs_mod.registry, "submit", fake_submit)
+    r = client.post(
+        "/api/runs",
+        json={
+            "ticker": "SPY",
+            "analysis_date": "2025-01-02",
+            "llm_provider": "ollama",
+        },
+    )
+    assert r.status_code == 202
+
+
+def test_run_summary_persists_across_registry_restart(monkeypatch) -> None:
+    """Terminal run summaries survive a backend restart (uvicorn --reload)."""
+    import time
+
+    from web.backend import runs as runs_mod
+    from web.backend.app import app
+
+    monkeypatch.setattr(
+        runs_mod.AnalysisRunner,
+        "run",
+        lambda self: {"final_trade_decision": "BUY"},
+    )
+
+    with TestClient(app) as client:
+        start = client.post(
+            "/api/runs",
+            json={"ticker": "SPY", "analysis_date": "2025-01-02"},
+        )
+        run_id = start.json()["run_id"]
+
+        # Wait for the terminal transition AND the persisted file (written in
+        # the executor coroutine's finally block).
+        deadline = time.time() + 5.0
+        persisted = []
+        while time.time() < deadline:
+            persisted = list(runs_mod._web_runs_dir().glob("*.json"))
+            if persisted:
+                break
+            time.sleep(0.05)
+        assert [p.stem for p in persisted] == [run_id]
+
+    # A fresh registry (server restart) serves the summary from disk.
+    fresh = runs_mod.RunRegistry()
+    summary = fresh.get_summary(run_id)
+    assert summary is not None
+    assert summary["status"] == "done"
+    assert summary["report_folder"]  # opaque reference used by the frontend
+    assert any(r["run_id"] == run_id for r in fresh.list_runs())
+    # Event buffers are not persisted; the API serves events: [] for these.
+    assert fresh.get(run_id) is None
 
 
 def test_get_unknown_run_404(client) -> None:

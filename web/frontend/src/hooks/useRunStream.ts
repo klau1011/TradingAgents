@@ -28,6 +28,7 @@ interface RunState {
   reports: Record<string, string>;
   decision: string | null;
   reportPath: string | null;
+  reportFolder: string | null;
   error: string | null;
   /** Earliest event timestamp seen — used as the timeline T0. */
   runStartedAt: string | null;
@@ -50,6 +51,7 @@ const createInitialState = (): RunState => ({
   reports: {},
   decision: null,
   reportPath: null,
+  reportFolder: null,
   error: null,
   runStartedAt: null,
   runFinishedAt: null,
@@ -182,6 +184,7 @@ function reducer(state: RunState, action: Action): RunState {
         status: "done",
         decision: e.decision,
         reportPath: e.report_path,
+        reportFolder: e.report_folder ?? null,
         runStartedAt,
         runFinishedAt: e.timestamp,
       };
@@ -315,18 +318,51 @@ export function useRunStream(runId: string | undefined): RunState {
     dispatch({ type: "backfill_start" });
     api
       .getRun(runId)
-      .then((detail) => {
-        if (disposed) return;
+      .then((detail): RunStatus | undefined => {
+        if (disposed) return undefined;
         for (const ev of detail.events) {
           ingest(ev as RunEvent);
         }
+        // Runs restored from disk after a server restart have a summary but
+        // no event buffer; synthesize the terminal state so the page doesn't
+        // sit on "queued".
+        if (detail.events.length === 0) {
+          const ts = detail.finished_at ?? detail.created_at;
+          if (detail.status === "done") {
+            ingest({
+              type: "done",
+              decision: detail.decision ?? "",
+              final_state_path: null,
+              report_path: detail.report_path,
+              report_folder: detail.report_folder,
+              timestamp: ts,
+            });
+          } else {
+            ingest({
+              type: "status",
+              status: detail.status,
+              queue_position: detail.queue_position,
+              timestamp: ts,
+            });
+          }
+          if (detail.status === "error" && detail.error) {
+            ingest({ type: "error", message: detail.error, timestamp: ts });
+          }
+        }
+        return detail.status;
       })
       .catch(() => {
         // Backfill failure isn't fatal — the WS may still attach.
+        return undefined;
       })
-      .finally(() => {
+      .then((status) => {
         if (disposed) return;
         dispatch({ type: "backfill_done" });
+        // Terminal runs stream nothing further, and rehydrated ones aren't in
+        // the live registry — connecting would just yield "Run not found".
+        if (status === "done" || status === "error" || status === "cancelled") {
+          return;
+        }
         connect();
       });
 

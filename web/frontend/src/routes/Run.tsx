@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
@@ -31,6 +31,14 @@ import { SECTION_LABELS } from "../types";
 export function RunPage() {
   const { runId } = useParams<{ runId: string }>();
   const state = useRunStream(runId);
+  const queryClient = useQueryClient();
+
+  // A finished run means a new report exists on disk; refresh the saved list.
+  useEffect(() => {
+    if (state.status === "done") {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+    }
+  }, [state.status, queryClient]);
 
   const reportEntries = Object.entries(state.reports);
   const latestReport = reportEntries[reportEntries.length - 1];
@@ -228,18 +236,28 @@ export function RunPage() {
         </div>
       </section>
 
-      {state.status === "done" && state.reportPath && (
+      {state.status === "done" && (state.reportFolder || state.reportPath) && (
         <section className="bg-canvas px-32p py-80p">
           <div className="mx-auto max-w-7xl flex flex-wrap items-center justify-between gap-4">
             <p className="font-display text-feature text-muted">
-              Report saved to <code className="text-fg">{state.reportPath}</code>
+              Report saved.
             </p>
-            <Link to="/history">
-              <Button variant="primary">
-                Open in history
-                <ArrowRight size={16} aria-hidden="true" />
-              </Button>
-            </Link>
+            <div className="flex flex-wrap gap-4">
+              {state.reportFolder && (
+                <Link to={`/reports/${encodeURIComponent(state.reportFolder)}`}>
+                  <Button variant="primary">
+                    View report
+                    <ArrowRight size={16} aria-hidden="true" />
+                  </Button>
+                </Link>
+              )}
+              <Link to="/history">
+                <Button variant={state.reportFolder ? "ghost" : "primary"}>
+                  Open in history
+                  <ArrowRight size={16} aria-hidden="true" />
+                </Button>
+              </Link>
+            </div>
           </div>
         </section>
       )}

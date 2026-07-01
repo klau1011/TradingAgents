@@ -119,14 +119,43 @@ def test_runner_emits_expected_event_sequence(tmp_path: Path) -> None:
                      "trader_investment_plan", "final_trade_decision"):
         assert required in sections_seen
 
-    # Done event carries the decision and a report path
+    # Done event carries the decision, a report path, and the opaque folder
+    # reference the web UI links to
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert done and done[-1].decision == "BUY"
+    assert done[-1].report_folder == runner.save_path.name
     report = runner.save_path / "complete_report.md"
     assert report.exists()
     report_text = report.read_text(encoding="utf-8")
     assert "## Market\nlooks strong" in report_text
     assert "PM says BUY" in report_text
+
+
+def test_runner_error_event_is_sanitized(tmp_path: Path) -> None:
+    """ErrorEvent messages are rendered verbatim in browsers, so they must
+    carry the exception summary only — no traceback / server internals."""
+    from tradingagents.runner_events import ErrorEvent
+
+    class _BoomInner:
+        def stream(self, init_state, **kwargs):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover
+
+    class _BoomGraph:
+        def __init__(self, *_, **__):
+            self.propagator = _StubPropagator()
+            self.graph = _BoomInner()
+
+    events: list = []
+    cfg = RunnerConfig(ticker="ERR", analysis_date="2025-01-02", analysts=["market"])
+    with patch.object(runner_mod, "TradingAgentsGraph", _BoomGraph):
+        runner = AnalysisRunner(config=cfg, on_event=events.append, save_dir=tmp_path)
+        with pytest.raises(RuntimeError):
+            runner.run()
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert errors and errors[-1].message == "RuntimeError: boom"
+    assert "Traceback" not in errors[-1].message
 
 
 def test_runner_dedups_repeat_status(tmp_path: Path) -> None:

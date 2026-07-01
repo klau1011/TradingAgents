@@ -67,6 +67,9 @@ class DoneEvent:
     decision: str
     final_state_path: str | None = None
     report_path: str | None = None
+    # Report folder name (opaque reference for the web UI; report_path is an
+    # absolute server path and should not be rendered in browsers).
+    report_folder: str | None = None
     type: str = "done"
     timestamp: str = field(default_factory=_now_iso)
 

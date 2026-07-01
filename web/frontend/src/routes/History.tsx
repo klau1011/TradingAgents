@@ -8,11 +8,20 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { SkeletonTable } from "../components/ui/Skeleton";
 
 export function HistoryPage() {
-  const reports = useQuery({ queryKey: ["reports"], queryFn: api.listReports });
   const runs = useQuery({
     queryKey: ["runs"],
     queryFn: api.listRuns,
     refetchInterval: 5000,
+  });
+  // Only poll reports while something is running, so a run finishing while
+  // this page is open shows up without a manual reload.
+  const hasActiveRuns = (runs.data ?? []).some(
+    (r) => r.status === "queued" || r.status === "running"
+  );
+  const reports = useQuery({
+    queryKey: ["reports"],
+    queryFn: api.listReports,
+    refetchInterval: hasActiveRuns ? 5000 : false,
   });
 
   return (

@@ -1312,6 +1312,11 @@ def evaluate(
         help="Add the social/sentiment analyst (WARNING: leaks 'now' social data "
         "into historical dates).",
     ),
+    cost: float = typer.Option(
+        0.0, "--cost",
+        help="Round-trip transaction cost per directional call, as a return "
+        "fraction (0.001 = 10 bps).",
+    ),
     out: str | None = typer.Option(
         None, "--out",
         help="Output directory (default ~/.tradingagents/backtests/<stamp>/).",
@@ -1371,7 +1376,7 @@ def evaluate(
     )
 
     report = render_report(
-        summarize(rows),
+        summarize(rows, cost=cost),
         meta={
             "tickers": ", ".join(tickers),
             "range": f"{from_date} -> {to_date}",

@@ -2,6 +2,7 @@ from typing import Annotated
 
 from langchain_core.tools import tool
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.interface import route_to_vendor
 
 
@@ -57,4 +58,12 @@ def get_insider_transactions(
     Returns:
         str: A report of insider transaction data
     """
+    # The insider feed is not bounded by the trade date, so recent filings
+    # would leak the future on a historical date.
+    if get_config().get("disable_lookahead_tools"):
+        return (
+            "DATA_UNAVAILABLE: insider transactions are disabled in "
+            "backtest/evaluation mode (the feed is not bounded by the trade "
+            "date). Use get_news bounded by the trade date instead."
+        )
     return route_to_vendor("get_insider_transactions", ticker)

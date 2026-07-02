@@ -39,6 +39,27 @@ def test_list_reports_skips_incomplete_by_default(fake_reports_root: Path) -> No
     assert folders == {"BAR_20260102_120000"}
 
 
+def test_list_reports_accepts_yahoo_ticker_folder_names(fake_reports_root: Path) -> None:
+    """Folders for every ticker form the run API accepts (GC=F, ^GSPC, BRK_B)
+    must be discoverable and servable — the Run page links directly to them."""
+    names = (
+        "GC=F_20260101_120000",
+        "^GSPC_20260102_120000_123456_abcd12",
+        "BRK_B_20260103_120000",
+    )
+    for name in names:
+        _write_complete(fake_reports_root / name)
+
+    listed = {r["folder"]: r for r in reports_mod.list_reports()}
+    assert set(listed) == set(names)
+    assert listed["GC=F_20260101_120000"]["ticker"] == "GC=F"
+    assert listed["^GSPC_20260102_120000_123456_abcd12"]["ticker"] == "^GSPC"
+    assert listed["BRK_B_20260103_120000"]["ticker"] == "BRK_B"
+
+    report = reports_mod.get_report("GC=F_20260101_120000")
+    assert report is not None and report["ticker"] == "GC=F"
+
+
 def test_list_reports_can_include_incomplete(fake_reports_root: Path) -> None:
     incomplete = fake_reports_root / "FOO_20260101_120000"
     incomplete.mkdir()

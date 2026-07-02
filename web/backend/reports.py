@@ -19,8 +19,11 @@ _CORRUPT_PLACEHOLDER = "_(content unavailable: file could not be read)_"
 # Folder name patterns:
 #   legacy:  TICKER_YYYYMMDD_HHMMSS                       (e.g. MSFT_20260413_203023)
 #   current: TICKER_YYYYMMDD_HHMMSS_microseconds_uuid6    (collision-safe)
+# The ticker class must accept every symbol the run API accepts (see
+# _TICKER_RE in web/backend/api.py: A-Z 0-9 . _ - ^ =), or completed runs for
+# e.g. GC=F / ^GSPC / BRK_B are invisible here and their report links 404.
 _FOLDER_RE = re.compile(
-    r"^(?P<ticker>[A-Za-z0-9.\-]+)_(?P<ts>\d{8}_\d{6})(?:_(?P<us>\d+))?(?:_(?P<uid>[a-f0-9]{4,}))?$"
+    r"^(?P<ticker>[A-Za-z0-9._\-^=]+)_(?P<ts>\d{8}_\d{6})(?:_(?P<us>\d+))?(?:_(?P<uid>[a-f0-9]{4,}))?$"
 )
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 

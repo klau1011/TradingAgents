@@ -1,5 +1,6 @@
+import { useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, FileText, ArrowRight } from "lucide-react";
 import { api } from "../api";
 import { Card } from "../components/ui/Card";
@@ -23,6 +24,18 @@ export function HistoryPage() {
     queryFn: api.listReports,
     refetchInterval: hasActiveRuns ? 5000 : false,
   });
+
+  // Flipping refetchInterval to false cancels the pending reports poll, so a
+  // run finishing between polls would leave its report unlisted; force one
+  // final refresh on the active -> idle transition.
+  const queryClient = useQueryClient();
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    if (wasActiveRef.current && !hasActiveRuns) {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+    }
+    wasActiveRef.current = hasActiveRuns;
+  }, [hasActiveRuns, queryClient]);
 
   return (
     <div className="mx-auto max-w-7xl px-32p py-80p space-y-80p">

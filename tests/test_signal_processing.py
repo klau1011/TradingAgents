@@ -33,6 +33,17 @@ class TestParseRating:
     def test_explicit_label_with_markdown_bold_label(self):
         assert parse_rating("**Rating**: Underweight\nTrim exposure.") == "Underweight"
 
+    def test_recommendation_label_wins_over_earlier_prose(self):
+        # Research Manager render shape: the labeled line must beat a rating
+        # word appearing earlier in free prose.
+        text = "Despite bulls urging Buy, the risks dominate.\n**Recommendation**: Sell"
+        assert parse_rating(text) == "Sell"
+
+    def test_action_label_wins_over_earlier_prose(self):
+        # Trader render shape (**Action**: X).
+        text = "The manager's Buy case is weak on valuation.\n**Action**: Sell"
+        assert parse_rating(text) == "Sell"
+
     def test_rendered_pm_markdown_shape(self):
         # The exact shape produced by render_pm_decision must always parse.
         text = (

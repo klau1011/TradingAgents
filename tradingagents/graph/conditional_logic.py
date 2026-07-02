@@ -1,15 +1,18 @@
 # TradingAgents/graph/conditional_logic.py
 
 from tradingagents.agents.utils.agent_states import AgentState
+from tradingagents.agents.utils.rating import direction, parse_rating
 
 
 class ConditionalLogic:
     """Handles conditional logic for determining graph flow."""
 
-    def __init__(self, max_debate_rounds=1, max_risk_discuss_rounds=1):
+    def __init__(self, max_debate_rounds=1, max_risk_discuss_rounds=1,
+                 adaptive_extra_rounds=0):
         """Initialize with configuration parameters."""
         self.max_debate_rounds = max_debate_rounds
         self.max_risk_discuss_rounds = max_risk_discuss_rounds
+        self.adaptive_extra_rounds = adaptive_extra_rounds
 
     def should_continue_market(self, state: AgentState):
         """Determine if market analysis should continue."""
@@ -61,10 +64,20 @@ class ConditionalLogic:
         return "Bull Researcher"
 
     def should_continue_risk_analysis(self, state: AgentState) -> str:
-        """Determine if risk analysis should continue."""
-        if (
-            state["risk_debate_state"]["count"] >= 3 * self.max_risk_discuss_rounds
-        ):  # 3 rounds of back-and-forth between 3 agents
+        """Determine if risk analysis should continue.
+
+        Past the base cap, extra rounds (up to ``adaptive_extra_rounds``) run
+        only while the Research Manager's plan and the Trader's proposal point
+        in different directions — deterministic, no LLM call.
+        """
+        count = state["risk_debate_state"]["count"]
+        # 3 rounds of back-and-forth between 3 agents
+        hard_cap = 3 * (self.max_risk_discuss_rounds + self.adaptive_extra_rounds)
+        if count >= hard_cap:
+            return "Portfolio Manager"
+        if count >= 3 * self.max_risk_discuss_rounds and direction(
+            parse_rating(state["investment_plan"])
+        ) == direction(parse_rating(state["trader_investment_plan"])):
             return "Portfolio Manager"
         if state["risk_debate_state"]["latest_speaker"].startswith("Aggressive"):
             return "Conservative Analyst"

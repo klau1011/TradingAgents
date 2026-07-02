@@ -31,15 +31,22 @@ def direction(rating: str | None) -> int:
     return RATING_DIRECTION.get((rating or "").strip().lower(), 0)
 
 # Matches "Rating: X" / "rating - X" / "Rating: **X**" — tolerates markdown
-# bold wrappers and either a colon or hyphen separator.
-_RATING_LABEL_RE = re.compile(r"rating.*?[:\-][\s*]*(\w+)", re.IGNORECASE)
+# bold wrappers and either a colon or hyphen separator. "Recommendation" and
+# "Action" are included so the Research Manager's and Trader's rendered plans
+# (**Recommendation**: X / **Action**: X) hit the label pass instead of the
+# first-word fallback, which prose like "despite the Buy recommendation,
+# Sell" would mislead.
+_RATING_LABEL_RE = re.compile(
+    r"\b(?:rating|recommendation|action)\b.*?[:\-][\s*]*(\w+)", re.IGNORECASE
+)
 
 
 def parse_rating(text: str, default: str = "Hold") -> str:
     """Heuristically extract a 5-tier rating from prose text.
 
     Two-pass strategy:
-    1. Look for an explicit "Rating: X" label (tolerant of markdown bold).
+    1. Look for an explicit "Rating: X" / "Recommendation: X" / "Action: X"
+       label (tolerant of markdown bold).
     2. Fall back to the first 5-tier rating word found anywhere in the text.
 
     Returns a Title-cased rating string, or ``default`` if no rating word appears.

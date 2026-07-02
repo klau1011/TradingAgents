@@ -25,6 +25,13 @@ def create_trader(llm):
         instrument_context = get_instrument_context_from_state(state)
         investment_plan = state["investment_plan"]
 
+        past_context = state.get("past_context", "")
+        lessons_block = (
+            f"\n\nPast lessons from prior decisions and outcomes:\n{past_context}"
+            if past_context
+            else ""
+        )
+
         messages = [
             {
                 "role": "system",
@@ -42,7 +49,8 @@ def create_trader(llm):
                     f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
                     f"insights from current technical market trends, macroeconomic indicators, and "
                     f"social media sentiment. Use this plan as a foundation for evaluating your next "
-                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
+                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}"
+                    f"{lessons_block}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),
             },

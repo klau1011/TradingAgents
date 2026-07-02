@@ -200,6 +200,22 @@ class TestTraderAgent:
         prompt = captured["prompt"]
         assert any("Proposed Investment Plan" in m["content"] for m in prompt)
 
+    def test_lessons_block_present_iff_past_context(self):
+        captured = {}
+        llm = _structured_trader_llm(captured)
+        trader = create_trader(llm)
+
+        state = _make_trader_state()
+        state["past_context"] = "[2026-01-05 | AAPL | Buy | +5.0% | +2.0% | 5d]\nGreat call."
+        trader(state)
+        user_content = captured["prompt"][1]["content"]
+        assert "Past lessons from prior decisions and outcomes" in user_content
+        assert "Great call." in user_content
+
+        trader(_make_trader_state())  # no past_context key
+        user_content = captured["prompt"][1]["content"]
+        assert "Past lessons" not in user_content
+
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain_response = (
             "**Action**: Sell\n\nGuidance cut hits margins.\n\n"

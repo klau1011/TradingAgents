@@ -5,9 +5,16 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+from tradingagents.agents import (
+    create_aggressive_debator,
+    create_bear_researcher,
+    create_bull_researcher,
+    create_conservative_debator,
+    create_neutral_debator,
+)
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
 from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
-from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.memory import TradingMemoryLog, _parse_pct
 from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.reflection import Reflector
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -36,10 +43,10 @@ def make_log(tmp_path, filename="trading_memory.md"):
     return TradingMemoryLog(config)
 
 
-def _seed_completed(tmp_path, ticker, date, decision_text, reflection_text, filename="trading_memory.md"):
+def _seed_completed(tmp_path, ticker, date, decision_text, reflection_text, filename="trading_memory.md", alpha="+0.5%"):
     """Write a completed entry directly to file, bypassing the API."""
     entry = (
-        f"[{date} | {ticker} | Buy | +1.0% | +0.5% | 5d]\n\n"
+        f"[{date} | {ticker} | Buy | +1.0% | {alpha} | 5d]\n\n"
         f"DECISION:\n{decision_text}\n\n"
         f"REFLECTION:\n{reflection_text}"
         + _SEP
@@ -263,7 +270,7 @@ class TestTradingMemoryLogCore:
         log = make_log(tmp_path)
         _seed_completed(tmp_path, "AAPL", "2026-01-05", "Buy AAPL — Services growth.", "Correct.")
         ctx = log.get_past_context("NVDA")
-        assert "Recent cross-ticker lessons" in ctx
+        assert "Cross-ticker lessons" in ctx
         assert "Past analyses of NVDA" not in ctx
 
     def test_n_same_limit_respected(self, tmp_path):
@@ -748,8 +755,8 @@ class TestPortfolioManagerInjection:
         _resolve_entry(log, "AAPL", "2026-01-06", DECISION_SELL, "Overvalued.")
         result = log.get_past_context("NVDA")
         assert "Past analyses of NVDA" in result
-        assert "Recent cross-ticker lessons" in result
-        same_block, cross_block = result.split("Recent cross-ticker lessons")
+        assert "Cross-ticker lessons" in result
+        same_block, cross_block = result.split("Cross-ticker lessons")
         assert "NVDA" in same_block
         assert "AAPL" in cross_block
 
@@ -869,3 +876,123 @@ class TestLegacyRemoval:
         assert len(entries) == 1
         assert entries[0]["ticker"] == "NVDA"
         assert entries[0]["pending"] is True
+
+
+# ---------------------------------------------------------------------------
+# Cross-ticker relevance: |alpha| ordering (PR 5)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestCrossTickerRelevance:
+
+    def test_parse_pct(self):
+        assert _parse_pct("+3.2%") == 3.2
+        assert _parse_pct("-1.5%") == -1.5
+        assert _parse_pct("n/a") is None
+        assert _parse_pct(None) is None
+        assert _parse_pct("") is None
+
+    def test_cross_ticker_ordered_by_abs_alpha(self, tmp_path):
+        log = make_log(tmp_path)
+        _seed_completed(tmp_path, "AAPL", "2026-01-05", "d", "AAPL lesson.", alpha="+1.0%")
+        _seed_completed(tmp_path, "MSFT", "2026-01-06", "d", "MSFT lesson.", alpha="-8.0%")
+        _seed_completed(tmp_path, "TSLA", "2026-01-07", "d", "TSLA lesson.", alpha="+3.0%")
+        _seed_completed(tmp_path, "AMZN", "2026-01-08", "d", "AMZN lesson.", alpha="+0.2%")
+        ctx = log.get_past_context("NVDA")
+        assert "AMZN lesson." not in ctx  # smallest |alpha| drops out of top 3
+        assert (
+            ctx.index("MSFT lesson.")
+            < ctx.index("TSLA lesson.")
+            < ctx.index("AAPL lesson.")
+        )
+
+    def test_tie_break_most_recent_first(self, tmp_path):
+        log = make_log(tmp_path)
+        _seed_completed(tmp_path, "AAPL", "2026-01-05", "d", "Older lesson.", alpha="+2.0%")
+        _seed_completed(tmp_path, "MSFT", "2026-01-06", "d", "Newer lesson.", alpha="-2.0%")
+        ctx = log.get_past_context("NVDA")
+        assert ctx.index("Newer lesson.") < ctx.index("Older lesson.")
+
+    def test_unparseable_alpha_sorts_last(self, tmp_path):
+        log = make_log(tmp_path)
+        _seed_completed(tmp_path, "AAPL", "2026-01-06", "d", "No-alpha lesson.", alpha="n/a")
+        _seed_completed(tmp_path, "MSFT", "2026-01-05", "d", "Small-alpha lesson.", alpha="+0.1%")
+        ctx = log.get_past_context("NVDA")
+        assert ctx.index("Small-alpha lesson.") < ctx.index("No-alpha lesson.")
+
+    def test_same_ticker_stays_recency_ordered(self, tmp_path):
+        log = make_log(tmp_path)
+        _seed_completed(tmp_path, "NVDA", "2026-01-05", "Old decision.", "r", alpha="+9.0%")
+        _seed_completed(tmp_path, "NVDA", "2026-01-06", "New decision.", "r", alpha="+0.1%")
+        ctx = log.get_past_context("NVDA")
+        assert ctx.index("New decision.") < ctx.index("Old decision.")
+
+
+# ---------------------------------------------------------------------------
+# Past-lessons injection into researchers and risk debators (PR 5)
+# ---------------------------------------------------------------------------
+
+def _researcher_state(past_context=""):
+    return {
+        "company_of_interest": "NVDA",
+        "investment_debate_state": {
+            "history": "", "bull_history": "", "bear_history": "",
+            "current_response": "", "count": 0,
+        },
+        "market_report": "Market report.",
+        "sentiment_report": "Sentiment report.",
+        "news_report": "News report.",
+        "fundamentals_report": "Fundamentals report.",
+        "past_context": past_context,
+    }
+
+
+def _risk_debator_state(past_context=""):
+    return {
+        "company_of_interest": "NVDA",
+        "risk_debate_state": {
+            "history": "", "aggressive_history": "", "conservative_history": "",
+            "neutral_history": "", "current_aggressive_response": "",
+            "current_conservative_response": "", "current_neutral_response": "",
+            "count": 0,
+        },
+        "market_report": "Market report.",
+        "sentiment_report": "Sentiment report.",
+        "news_report": "News report.",
+        "fundamentals_report": "Fundamentals report.",
+        "trader_investment_plan": "Trader plan.",
+        "past_context": past_context,
+    }
+
+
+_LESSONS_HEADER = "Past lessons from prior decisions and outcomes"
+_INJECTION_AGENTS = [
+    (create_bull_researcher, _researcher_state),
+    (create_bear_researcher, _researcher_state),
+    (create_aggressive_debator, _risk_debator_state),
+    (create_conservative_debator, _risk_debator_state),
+    (create_neutral_debator, _risk_debator_state),
+]
+
+
+@pytest.mark.unit
+class TestPastContextInjection:
+
+    @pytest.mark.parametrize(
+        "factory,make_state", _INJECTION_AGENTS,
+        ids=lambda x: getattr(x, "__name__", ""),
+    )
+    def test_lessons_block_present_iff_past_context(self, factory, make_state):
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="ok")
+        node = factory(llm)
+
+        node(make_state(past_context="[2026-01-05 | AAPL | Buy | +5.0% | +2.0% | 5d]\nGreat call."))
+        prompt = llm.invoke.call_args[0][0]
+        assert _LESSONS_HEADER in prompt
+        assert "Great call." in prompt
+
+        llm.invoke.reset_mock()
+        node(make_state(past_context=""))
+        prompt = llm.invoke.call_args[0][0]
+        assert _LESSONS_HEADER not in prompt

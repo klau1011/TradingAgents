@@ -6,6 +6,16 @@ from pathlib import Path
 from tradingagents.agents.utils.rating import parse_rating
 
 
+def _parse_pct(value: str | None) -> float | None:
+    """Parse a formatted percent string ("+3.2%") to a float, None on failure."""
+    if not value:
+        return None
+    try:
+        return float(value.strip().rstrip("%"))
+    except ValueError:
+        return None
+
+
 class TradingMemoryLog:
     """Append-only markdown log of trading decisions and reflections."""
 
@@ -68,19 +78,27 @@ class TradingMemoryLog:
         return [e for e in self.load_entries() if e.get("pending")]
 
     def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
-        """Return formatted past context string for agent prompt injection."""
+        """Return formatted past context string for agent prompt injection.
+
+        Same-ticker entries are picked by recency; cross-ticker entries by
+        |alpha| (biggest realized wins/losses carry the most instructive
+        reflections), tie-break recency, unparseable alpha last.
+        """
+        # ponytail: magnitude heuristic; upgrade path is tag/embedding matching
         entries = [e for e in self.load_entries() if not e.get("pending")]
         if not entries:
             return ""
 
-        same, cross = [], []
-        for e in reversed(entries):
-            if len(same) >= n_same and len(cross) >= n_cross:
-                break
-            if e["ticker"] == ticker and len(same) < n_same:
-                same.append(e)
-            elif e["ticker"] != ticker and len(cross) < n_cross:
-                cross.append(e)
+        same = [e for e in reversed(entries) if e["ticker"] == ticker][:n_same]
+        cross = [e for e in reversed(entries) if e["ticker"] != ticker]
+        # Stable sort over the most-recent-first list keeps recency as tie-break.
+        cross.sort(
+            key=lambda e: (
+                abs(a) if (a := _parse_pct(e["alpha"])) is not None else -1.0
+            ),
+            reverse=True,
+        )
+        cross = cross[:n_cross]
 
         if not same and not cross:
             return ""
@@ -90,7 +108,7 @@ class TradingMemoryLog:
             parts.append(f"Past analyses of {ticker} (most recent first):")
             parts.extend(self._format_full(e) for e in same)
         if cross:
-            parts.append("Recent cross-ticker lessons:")
+            parts.append("Cross-ticker lessons (largest realized alpha first):")
             parts.extend(self._format_reflection_only(e) for e in cross)
         return "\n\n".join(parts)
 

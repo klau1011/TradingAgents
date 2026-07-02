@@ -17,8 +17,17 @@ shortest working diff, reuse existing utilities, no new dependencies.
   `<results_dir>/web_runs/`, API-key preflight (400), sanitized `ErrorEvent`,
   opaque `report_folder` references + "View report" link, History staleness
   fixes, rehydrated-run handling in `useRunStream`.
+- **PR 4 — Model routing + adaptive risk debate** (`0517829`):
+  `agent_llm_map` per-stage quick/deep assignment (validated in
+  `GraphSetup`); `adaptive_extra_rounds` extends the risk debate past the
+  base cap only while `direction(parse_rating(...))` disagrees between the
+  Research Manager's and Trader's plans. Both default to today's behavior.
+- **PR 5 — Memory & reflection** (`4b0ef75`): cross-ticker
+  `get_past_context` selection now top-3 by |alpha| (`_parse_pct`,
+  tie-break recency, unparseable last); guarded past-lessons block injected
+  into bull/bear researchers, trader, and the three risk debators.
 
-**Remaining: PRs 3–6 below.** Each is a self-contained change; suggested
+**Remaining: PRs 3 and 6 below.** Each is a self-contained change; suggested
 order preserved. Per-PR verification: `pytest -m "unit or smoke"` (conftest
 stubs API keys), plus `npm run build` in `web/frontend` when frontend files
 change.
@@ -55,78 +64,6 @@ token attribution, CLI footer changes.
 Verify: `event_to_dict(StatsEvent)` round-trip + stub-graph stats-emission
 test in `tests/test_runner_events.py` (`_StubGraph` pattern);
 `python -c "import cli.main"` smoke.
-
-## PR 4 — Model routing + adaptive risk debate
-
-Two opt-in config knobs, both defaulting to today's exact behavior.
-
-**Per-stage model assignment**
-
-1. `tradingagents/default_config.py`: add `"agent_llm_map": {}`. Stages:
-   `analysts`, `researchers`, `research_manager`, `trader`, `risk_analysts`,
-   `portfolio_manager`, `investor_briefing`; values `"quick"` / `"deep"`.
-   Empty dict = current behavior (analysts + trader on quick, managers on
-   deep). No env override (the `_coerce` machinery doesn't do dicts).
-2. `tradingagents/graph/setup.py`: `GraphSetup.__init__` gains
-   `llm_map: dict | None = None` plus a `_llm(stage, default)` helper
-   (raise `ValueError` on unknown stage/value); replace the hardcoded
-   quick/deep picks (~lines 61–78).
-3. `tradingagents/graph/trading_graph.py` (~line 116): pass
-   `self.config.get("agent_llm_map")`.
-
-No UI exposure; reachable via config / `RunnerConfig.extra_config`.
-
-**Adaptive risk debate**
-
-Cheap deterministic disagreement signal, verified present in state: by the
-time `should_continue_risk_analysis` runs, `state["investment_plan"]`
-(Research Manager) and `state["trader_investment_plan"]` (Trader) both carry
-parseable ratings (`parse_rating` in `agents/utils/rating.py`; `direction()`
-landed in PR 1).
-
-1. `tradingagents/graph/conditional_logic.py`: `__init__` gains
-   `adaptive_extra_rounds=0`. In `should_continue_risk_analysis`, past the
-   base cap but under `3 * (max_risk_discuss_rounds + adaptive_extra_rounds)`,
-   continue only if
-   `direction(parse_rating(investment_plan)) != direction(parse_rating(trader_investment_plan))`.
-2. `default_config.py`: `"adaptive_extra_rounds": 0`;
-   `trading_graph.py` (~lines 112–115) passes it through.
-
-Not doing: adaptive bull/bear debate (they disagree by construction),
-LLM-judged disagreement scoring.
-
-Verify: pure-state `ConditionalLogic` unit tests (no LLM): agreement → stop
-at base cap; disagreement → exactly N extra cycles then stop; default 0 →
-identical to today.
-
-## PR 5 — Memory & reflection
-
-**Relevance-based retrieval.** `tradingagents/agents/utils/memory.py`
-`get_past_context` (~line 70): same-ticker selection stays recency (recent
-context on the same name is genuinely most relevant); cross-ticker selection
-changes from "last 3" to "top 3 by |alpha|" (biggest realized wins/losses
-carry the most instructive reflections), tie-break recency. Needs a small
-`_parse_pct("+3.2%") -> float | None` helper since entries store alpha as a
-formatted string (written in `update_with_outcome`, ~line 122). This is a
-magnitude heuristic; the upgrade path is tag/embedding matching. Not doing:
-embeddings, LLM relevance scoring, regime tags (on-disk format change).
-
-**Wider injection.** Copy the guarded block pattern from
-`agents/managers/portfolio_manager.py:35-40` ("Past lessons" section,
-rendered only when `past_context` is non-empty) into:
-`researchers/bull_researcher.py`, `researchers/bear_researcher.py`,
-`trader/trader.py`, `risk_mgmt/aggressive_debator.py`,
-`risk_mgmt/conservative_debator.py`, `risk_mgmt/neutral_debator.py`.
-`past_context` is already in graph state (`graph/propagation.py:40`); all six
-nodes already receive `state`. Accepted token cost: the string is bounded by
-`n_same`/`n_cross` and the 300-char cross-ticker truncation.
-
-Verify: `tests/test_memory_log.py` — |alpha| cross-ticker ordering and
-`_parse_pct`; per-agent prompt-capture tests with a fake `llm.invoke`
-(researchers/debators call `llm.invoke(prompt)` directly; trader via the
-fake-structured-LLM pattern in `tests/test_structured_agents.py`). Assert
-the block is present iff `past_context` is set. Measure the behavior change
-with the PR 1 harness before/after.
 
 ## PR 6 — Sizing outputs
 
@@ -168,3 +105,6 @@ pass-through test in `tests/test_reports_module.py`.
   real use case.
 - Web run persistence is JSON-per-run with no locking (single-process
   server); move to sqlite if multi-worker ever happens.
+- PR 5's behavior change (|alpha| retrieval + wider injection) has not been
+  measured with the PR 1 eval harness yet — run a before/after backtest when
+  spending eval budget next.

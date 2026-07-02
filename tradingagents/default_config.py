@@ -158,9 +158,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",
+    # Per-stage model routing. Keys: analysts, researchers, research_manager,
+    # trader, risk_analysts, portfolio_manager, investor_briefing; values
+    # "quick" / "deep". Empty = current defaults (managers on deep, rest on
+    # quick). No env override (env coercion doesn't handle dicts).
+    "agent_llm_map": {},
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
+    # Extra risk-debate rounds granted only while the Research Manager's and
+    # Trader's rating directions disagree. 0 = today's fixed cap.
+    "adaptive_extra_rounds": 0,
     "max_recur_limit": 100,
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;

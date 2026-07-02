@@ -112,12 +112,14 @@ class TradingAgentsGraph:
         self.conditional_logic = ConditionalLogic(
             max_debate_rounds=self.config["max_debate_rounds"],
             max_risk_discuss_rounds=self.config["max_risk_discuss_rounds"],
+            adaptive_extra_rounds=self.config.get("adaptive_extra_rounds", 0),
         )
         self.graph_setup = GraphSetup(
             self.quick_thinking_llm,
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            llm_map=self.config.get("agent_llm_map"),
         )
 
         self.propagator = Propagator(

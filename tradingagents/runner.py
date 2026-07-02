@@ -18,8 +18,8 @@ It is intentionally synchronous; callers that need async behavior should run
 from __future__ import annotations
 
 import datetime
+import logging
 import threading
-import traceback
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -46,6 +46,8 @@ from tradingagents.runner_events import (
     StatusEvent,
     ToolCallEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 EventCallback = Callable[[RunEvent], None]
 _CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
@@ -283,6 +285,7 @@ class AnalysisRunner:
                     decision=decision,
                     final_state_path=str(self.save_path),
                     report_path=str(report_path),
+                    report_folder=self.save_path.name,
                 )
             )
             self._emit(StatusEvent(status="done"))
@@ -298,9 +301,10 @@ class AnalysisRunner:
             self._emit(StatusEvent(status="cancelled"))
             raise
         except Exception as exc:  # noqa: BLE001
-            self._emit(
-                ErrorEvent(message=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
-            )
+            # Full traceback goes to the server log only; the event message is
+            # shown verbatim in browsers, so keep it to the exception summary.
+            logger.exception("Analysis run failed for %s", self.config.ticker)
+            self._emit(ErrorEvent(message=f"{type(exc).__name__}: {exc}"))
             self._emit(StatusEvent(status="error"))
             raise
 

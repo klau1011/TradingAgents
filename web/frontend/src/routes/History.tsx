@@ -1,5 +1,6 @@
+import { useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, FileText, ArrowRight } from "lucide-react";
 import { api } from "../api";
 import { Card } from "../components/ui/Card";
@@ -8,12 +9,33 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { SkeletonTable } from "../components/ui/Skeleton";
 
 export function HistoryPage() {
-  const reports = useQuery({ queryKey: ["reports"], queryFn: api.listReports });
   const runs = useQuery({
     queryKey: ["runs"],
     queryFn: api.listRuns,
     refetchInterval: 5000,
   });
+  // Only poll reports while something is running, so a run finishing while
+  // this page is open shows up without a manual reload.
+  const hasActiveRuns = (runs.data ?? []).some(
+    (r) => r.status === "queued" || r.status === "running"
+  );
+  const reports = useQuery({
+    queryKey: ["reports"],
+    queryFn: api.listReports,
+    refetchInterval: hasActiveRuns ? 5000 : false,
+  });
+
+  // Flipping refetchInterval to false cancels the pending reports poll, so a
+  // run finishing between polls would leave its report unlisted; force one
+  // final refresh on the active -> idle transition.
+  const queryClient = useQueryClient();
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    if (wasActiveRef.current && !hasActiveRuns) {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+    }
+    wasActiveRef.current = hasActiveRuns;
+  }, [hasActiveRuns, queryClient]);
 
   return (
     <div className="mx-auto max-w-7xl px-32p py-80p space-y-80p">

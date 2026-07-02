@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
+import logging
 import threading
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.runner import AnalysisRunner, RunCancelled, RunnerConfig
 from tradingagents.runner_events import (
     MessageEvent,
@@ -24,10 +28,16 @@ from tradingagents.runner_events import (
     event_to_dict,
 )
 
+logger = logging.getLogger(__name__)
+
 MAX_CONCURRENT_RUNS = 3
 MAX_RECENT_RUNS = 50
 EVENT_BUFFER_SIZE = 500
 SUBSCRIBER_QUEUE_SIZE = 1000
+
+
+def _web_runs_dir() -> Path:
+    return Path(DEFAULT_CONFIG["results_dir"]) / "web_runs"
 
 
 @dataclass
@@ -47,6 +57,7 @@ class RunRecord:
     finished_at: str | None = None
     decision: str | None = None
     report_path: str | None = None
+    report_folder: str | None = None
     error: str | None = None
 
     # Internal: bounded event log + live subscribers
@@ -72,6 +83,7 @@ class RunRecord:
             "finished_at": self.finished_at,
             "decision": self.decision,
             "report_path": self.report_path,
+            "report_folder": self.report_folder,
             "error": self.error,
         }
 
@@ -86,6 +98,52 @@ class RunRegistry:
         self._order: deque[str] = deque(maxlen=MAX_RECENT_RUNS)
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Terminal run summaries persisted on disk, loaded lazily. Keeps run
+        # history visible across server restarts (uvicorn --reload wipes the
+        # in-memory registry). Event buffers are not persisted.
+        self._persisted: dict[str, dict[str, Any]] | None = None
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+    # ponytail: JSON file per run, no locking — single-process server. Move to
+    # sqlite if multi-worker ever happens.
+
+    def _persist(self, record: RunRecord) -> None:
+        """Write a terminal run's summary to disk; never raises."""
+        try:
+            summary = record.to_summary()
+            runs_dir = _web_runs_dir()
+            runs_dir.mkdir(parents=True, exist_ok=True)
+            path = runs_dir / f"{record.run_id}.json"
+            path.write_text(json.dumps(summary), encoding="utf-8")
+            if self._persisted is not None:
+                self._persisted[record.run_id] = summary
+            # Prune oldest files beyond the recent window.
+            files = sorted(
+                runs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+            )
+            for stale in files[MAX_RECENT_RUNS:]:
+                stale.unlink(missing_ok=True)
+                if self._persisted is not None:
+                    self._persisted.pop(stale.stem, None)
+        except OSError as exc:
+            logger.warning("Could not persist run %s: %s", record.run_id, exc)
+
+    def _load_persisted(self) -> dict[str, dict[str, Any]]:
+        if self._persisted is None:
+            self._persisted = {}
+            runs_dir = _web_runs_dir()
+            if runs_dir.exists():
+                for path in runs_dir.glob("*.json"):
+                    try:
+                        summary = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError) as exc:
+                        logger.warning("Skipping unreadable run file %s: %s", path, exc)
+                        continue
+                    if isinstance(summary, dict) and summary.get("run_id"):
+                        self._persisted[summary["run_id"]] = summary
+        return self._persisted
 
     def _ensure_semaphore(self) -> asyncio.Semaphore:
         if self._semaphore is None:
@@ -187,6 +245,7 @@ class RunRegistry:
                     ),
                 )
                 self._record_event(record, StatusEvent(status="cancelled"))
+                self._persist(record)
                 for q in list(record.subscribers):
                     self._close_subscriber(record, q)
                 return
@@ -212,6 +271,7 @@ class RunRegistry:
                 await loop.run_in_executor(None, runner.run)
                 record.status = "done"
                 record.report_path = str(runner.save_path / "complete_report.md")
+                record.report_folder = runner.save_path.name
                 # Pull decision from the latest done event if present
                 for ev in reversed(record.events):
                     if ev.get("type") == "done":
@@ -243,6 +303,7 @@ class RunRegistry:
                     self._record_event(
                         record, StatusEvent(status=record.status)  # type: ignore[arg-type]
                     )
+                self._persist(record)
                 # Close all subscriber queues so WS endpoints exit gracefully
                 for q in list(record.subscribers):
                     self._close_subscriber(record, q)
@@ -315,8 +376,23 @@ class RunRegistry:
     def get(self, run_id: str) -> RunRecord | None:
         return self._runs.get(run_id)
 
+    def get_summary(self, run_id: str) -> dict[str, Any] | None:
+        """Summary for a live or persisted run (live wins)."""
+        record = self._runs.get(run_id)
+        if record is not None:
+            return record.to_summary()
+        return self._load_persisted().get(run_id)
+
     def list_runs(self) -> list[dict[str, Any]]:
-        return [self._runs[rid].to_summary() for rid in self._order if rid in self._runs]
+        """Live + persisted run summaries, newest first, capped."""
+        merged = dict(self._load_persisted())
+        for rid in self._order:
+            if rid in self._runs:
+                merged[rid] = self._runs[rid].to_summary()
+        ordered = sorted(
+            merged.values(), key=lambda s: s.get("created_at") or "", reverse=True
+        )
+        return ordered[:MAX_RECENT_RUNS]
 
 
 registry = RunRegistry()

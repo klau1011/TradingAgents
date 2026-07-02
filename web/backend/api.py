@@ -144,6 +144,15 @@ def config_options() -> dict[str, Any]:
 
 @router.post("/api/runs", status_code=202)
 async def start_run(payload: StartRunRequest, response: Response) -> dict[str, Any]:
+    # Preflight the API key so a missing key fails here with a clear message
+    # instead of mid-run with a runtime error.
+    key_status = _provider_key_status().get(payload.llm_provider)
+    if key_status and key_status["required"] and not key_status["set"]:
+        env_vars = " or ".join(key_status["env_vars"]) or "the provider API key"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing API key for provider '{payload.llm_provider}': set {env_vars}.",
+        )
     config = RunnerConfig(
         ticker=payload.ticker,
         analysis_date=payload.analysis_date,
@@ -171,12 +180,17 @@ def list_runs() -> dict[str, Any]:
 @router.get("/api/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
     record = registry.get(run_id)
-    if record is None:
+    if record is not None:
+        return {
+            **record.to_summary(),
+            "events": list(record.events),
+        }
+    # Terminal runs from a previous server process: summary survives on disk,
+    # the event buffer does not (report content is served via /api/reports).
+    summary = registry.get_summary(run_id)
+    if summary is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    return {
-        **record.to_summary(),
-        "events": list(record.events),
-    }
+    return {**summary, "events": []}
 
 
 @router.delete("/api/runs/{run_id}")

@@ -20,6 +20,16 @@ RATINGS_5_TIER: tuple[str, ...] = (
 
 _RATING_SET = {r.lower() for r in RATINGS_5_TIER}
 
+# Position direction per rating: +1 long, -1 short, 0 flat.
+RATING_DIRECTION: dict[str, int] = {
+    "buy": 1, "overweight": 1, "hold": 0, "underweight": -1, "sell": -1,
+}
+
+
+def direction(rating: str | None) -> int:
+    """Map a 5-tier rating to a position direction: +1 long, -1 short, 0 flat."""
+    return RATING_DIRECTION.get((rating or "").strip().lower(), 0)
+
 # Matches "Rating: X" / "rating - X" / "Rating: **X**" — tolerates markdown
 # bold wrappers and either a colon or hyphen separator.
 _RATING_LABEL_RE = re.compile(r"rating.*?[:\-][\s*]*(\w+)", re.IGNORECASE)

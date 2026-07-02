@@ -52,6 +52,16 @@ def test_direction_mapping():
     assert backtest._direction(None) == 0
 
 
+def test_direction_is_shared_with_rating_module():
+    """conditional_logic and backtest must agree on rating direction."""
+    from tradingagents.agents.utils import rating
+
+    assert backtest._direction is rating.direction
+    assert rating.RATING_DIRECTION == {
+        "buy": 1, "overweight": 1, "hold": 0, "underweight": -1, "sell": -1,
+    }
+
+
 def test_summary_headline_metrics():
     s = backtest.summarize(SAMPLE_ROWS)
 
@@ -113,6 +123,69 @@ def test_calibration_table():
     assert cal[("Hold", "low")]["hit_rate"] is None
 
 
+def test_transaction_cost_shifts_strategy_metrics():
+    """cost is charged per directional call: mean alpha shifts by exactly -cost;
+    baselines that trade (always-Buy) are charged too, buy-and-hold is not."""
+    s0 = backtest.summarize(SAMPLE_ROWS)
+    s1 = backtest.summarize(SAMPLE_ROWS, cost=0.001)
+
+    assert s1["cost"] == pytest.approx(0.001)
+    assert s1["mean_alpha"] == pytest.approx(s0["mean_alpha"] - 0.001)
+    # resolved alphas mean = 0.01 -> always-Buy pays cost, buy&hold doesn't
+    assert s0["baselines"]["always_buy_alpha"] == pytest.approx(0.01)
+    assert s1["baselines"]["always_buy_alpha"] == pytest.approx(0.009)
+    assert s1["baselines"]["buy_hold_raw"] == pytest.approx(
+        s0["baselines"]["buy_hold_raw"]
+    )
+    # hits unaffected in this dataset (no strat value within 0.001 of zero)
+    assert s1["hit_rate"] == pytest.approx(s0["hit_rate"])
+
+
+def test_baselines_known_answers():
+    b = backtest.summarize(SAMPLE_ROWS)["baselines"]
+    # raw defaults to alpha in _row, so buy&hold == mean resolved alpha = 0.01
+    assert b["buy_hold_raw"] == pytest.approx(0.01)
+    assert b["always_buy_alpha"] == pytest.approx(0.01)
+    # random ±1 has expectation 0; with 1000 seeded trials the mean is tiny
+    assert b["random_alpha_std"] > 0
+    assert abs(b["random_alpha_mean"]) < 0.01
+
+
+def test_baselines_reproducible_by_seed():
+    b1 = backtest.summarize(SAMPLE_ROWS, seed=7)["baselines"]
+    b2 = backtest.summarize(SAMPLE_ROWS, seed=7)["baselines"]
+    b3 = backtest.summarize(SAMPLE_ROWS, seed=8)["baselines"]
+    assert b1["random_alpha_mean"] == b2["random_alpha_mean"]
+    assert b1["random_alpha_mean"] != b3["random_alpha_mean"]
+
+
+def test_by_confidence_slices():
+    s = backtest.summarize(SAMPLE_ROWS)
+    slices = {b["confidence"]: b for b in s["by_confidence"]}
+
+    # high: strat [+.10, -.04, +.06] (two Buys + one Sell, all directional)
+    assert slices["high"]["n"] == 3
+    assert slices["high"]["hit_rate"] == pytest.approx(2 / 3)
+    assert slices["high"]["mean_alpha"] == pytest.approx(0.04)
+    # medium: Overweight +.02 (NVDA row is unresolved -> excluded)
+    assert slices["medium"]["n"] == 1
+    assert slices["medium"]["hit_rate"] == pytest.approx(1.0)
+    # low: Underweight on +.03 alpha -> strat -.03 (Hold is non-directional)
+    assert slices["low"]["n"] == 1
+    assert slices["low"]["hit_rate"] == pytest.approx(0.0)
+    assert slices["low"]["mean_alpha"] == pytest.approx(-0.03)
+    # sorted high -> medium -> low
+    assert [b["confidence"] for b in s["by_confidence"]] == ["high", "medium", "low"]
+
+
+def test_confidence_weighted_alpha():
+    s = backtest.summarize(SAMPLE_ROWS)
+    # weights: high=1.5 (x3 calls), medium=1.0 (x1), low=0.5 (x1)
+    # sum(w*s) = 1.5*(.10-.04+.06) + 1.0*(.02) + 0.5*(-.03) = 0.185
+    # sum(w) = 4.5 + 1.0 + 0.5 = 6.0
+    assert s["confidence_weighted_alpha"] == pytest.approx(0.185 / 6.0)
+
+
 def test_summarize_empty():
     s = backtest.summarize([])
     assert s["n_total"] == 0
@@ -120,6 +193,10 @@ def test_summarize_empty():
     assert s["signal_sharpe"] is None
     assert s["max_drawdown"] is None
     assert s["calibration"] == []
+    assert s["by_confidence"] == []
+    assert s["confidence_weighted_alpha"] is None
+    assert s["baselines"]["buy_hold_raw"] is None
+    assert s["baselines"]["random_alpha_mean"] is None
 
 
 def test_lookahead_safe_default_excludes_social():
@@ -260,10 +337,37 @@ def test_lookahead_guard_disables_live_tools():
         set_config({"disable_lookahead_tools": False})
 
 
+def test_lookahead_guard_disables_fundamentals_live_tools():
+    """With the eval guard set, the 'now'-reading fundamentals/news tools
+    return a sentinel instead of leaking current data into a historical date."""
+    from tradingagents.agents.utils.fundamental_data_tools import (
+        get_analyst_recommendations,
+        get_fundamentals,
+    )
+    from tradingagents.agents.utils.news_data_tools import get_insider_transactions
+    from tradingagents.dataflows.config import set_config
+
+    try:
+        set_config({"disable_lookahead_tools": True})
+        assert "disabled" in get_fundamentals.invoke(
+            {"ticker": "AAPL", "curr_date": "2025-01-02"}
+        ).lower()
+        assert "disabled" in get_analyst_recommendations.invoke(
+            {"ticker": "AAPL"}
+        ).lower()
+        assert "disabled" in get_insider_transactions.invoke(
+            {"ticker": "AAPL"}
+        ).lower()
+    finally:
+        set_config({"disable_lookahead_tools": False})
+
+
 def test_render_report_smoke():
     report = backtest.render_report(backtest.summarize(SAMPLE_ROWS))
     assert "Hit-rate" in report or "hit-rate" in report
     assert "Calibration" in report
+    assert "Baselines" in report
+    assert "By confidence" in report
 
 
 # --- Part A: confidence on the final decision ----------------------------------

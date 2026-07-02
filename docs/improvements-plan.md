@@ -166,9 +166,5 @@ pass-through test in `tests/test_reports_module.py`.
 - ETF profile tools still read "now" in eval mode (noted in the backtest
   report caveat); guard them like the PR 1 tools if ETF backtests become a
   real use case.
-- `web/backend/reports.py` `_FOLDER_RE` rejects folder names for tickers
-  containing `=` or `^` (e.g. `GC=F`, `^GSPC`): such reports are invisible
-  in the web reports list and their "View report" link 404s. Pre-existing;
-  fix by widening the regex + `_safe_folder` if those tickers matter.
 - Web run persistence is JSON-per-run with no locking (single-process
   server); move to sqlite if multi-worker ever happens.

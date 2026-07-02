@@ -26,7 +26,6 @@ from tradingagents.agents.utils.agent_states import AgentState
 from .analyst_execution import build_analyst_execution_plan
 from .conditional_logic import ConditionalLogic
 
-
 # Stages assignable in config["agent_llm_map"]; values are "quick" / "deep".
 LLM_MAP_STAGES = frozenset({
     "analysts",

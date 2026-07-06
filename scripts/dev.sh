@@ -3,6 +3,7 @@
 # Both stop together on Ctrl-C.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+PATH="$PWD/.venv/bin:$PATH"
 
 trap 'kill 0' EXIT
 

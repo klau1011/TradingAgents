@@ -8,8 +8,8 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 # want a hard-coded value that should ignore the environment.
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "openai"        # openai, google, anthropic, xai, openrouter, ollama
-config["deep_think_llm"] = "gpt-5.5"     # Model for complex reasoning
-config["quick_think_llm"] = "gpt-5.4-mini" # Model for quick tasks
+config["deep_think_llm"] = "gpt-5.6-sol"  # Model for complex reasoning
+config["quick_think_llm"] = "gpt-5.6-luna" # Model for quick tasks
 config["max_debate_rounds"] = 1  # Increase debate rounds
 
 # Configure data vendors (default uses yfinance, no extra API keys needed)

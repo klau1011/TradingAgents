@@ -44,8 +44,8 @@ export function NewRunPage() {
     "fundamentals",
   ]);
   const [provider, setProvider] = useState("openai");
-  const [shallow, setShallow] = useState("gpt-5.4-mini");
-  const [deep, setDeep] = useState("gpt-5.5");
+  const [shallow, setShallow] = useState("gpt-5.6-luna");
+  const [deep, setDeep] = useState("gpt-5.6-sol");
   const [depth, setDepth] = useState(1);
   const [language, setLanguage] = useState("English");
   // Provider-specific thinking depth. Mirrors the CLI's Step 8.
@@ -265,9 +265,12 @@ export function NewRunPage() {
                 onChange={(e) => setOpenaiEffort(e.target.value)}
                 className={inputCls}
               >
+                <option value="none">None (no reasoning)</option>
                 <option value="low">Low (faster)</option>
                 <option value="medium">Medium (default)</option>
                 <option value="high">High (more thorough)</option>
+                <option value="xhigh">Extra high</option>
+                <option value="max">Max</option>
               </select>
             </Field>
           )}

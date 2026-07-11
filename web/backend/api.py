@@ -42,8 +42,8 @@ class StartRunRequest(BaseModel):
     research_depth: int = 1
     llm_provider: str = "openai"
     backend_url: str = "https://api.openai.com/v1"
-    shallow_thinker: str = "gpt-5.4-mini"
-    deep_thinker: str = "gpt-5.5"
+    shallow_thinker: str = "gpt-5.6-luna"
+    deep_thinker: str = "gpt-5.6-sol"
     output_language: str = "English"
     google_thinking_level: str | None = None
     openai_reasoning_effort: str | None = None

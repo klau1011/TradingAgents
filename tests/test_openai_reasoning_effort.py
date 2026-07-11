@@ -16,6 +16,7 @@ from tradingagents.llm_clients.openai_client import (
 @pytest.mark.parametrize(
     "model,expected",
     [
+        ("gpt-5.6-sol", True), ("gpt-5.6-terra", True), ("gpt-5.6-luna", True),
         ("gpt-5.5", True), ("gpt-5.4", True), ("gpt-5.4-mini", True),
         ("gpt-5.5-pro", True), ("o1", True), ("o3-mini", True),
         ("gpt-4.1", False), ("gpt-4o", False), ("gpt-4o-mini", False),
@@ -26,15 +27,20 @@ def test_supports_reasoning_effort(model, expected):
     assert _supports_reasoning_effort(model) is expected
 
 
-def _effort_on(model, monkeypatch):
+def _effort_on(model, monkeypatch, effort="low"):
     # A fake key lets get_llm() construct the client without a network call.
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    llm = OpenAIClient(model, provider="openai", reasoning_effort="low").get_llm()
+    llm = OpenAIClient(model, provider="openai", reasoning_effort=effort).get_llm()
     return getattr(llm, "reasoning_effort", None)
 
 
 def test_reasoning_model_receives_effort(monkeypatch):
-    assert _effort_on("gpt-5.4-mini", monkeypatch) == "low"
+    assert _effort_on("gpt-5.6-luna", monkeypatch) == "low"
+
+
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max"])
+def test_gpt_5_6_receives_documented_effort_levels(monkeypatch, effort):
+    assert _effort_on("gpt-5.6-sol", monkeypatch, effort) == effort
 
 
 def test_non_reasoning_model_drops_effort(monkeypatch):

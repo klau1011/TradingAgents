@@ -436,6 +436,9 @@ def ask_openai_reasoning_effort() -> str:
         questionary.Choice("Medium (Default)", "medium"),
         questionary.Choice("High (More thorough)", "high"),
         questionary.Choice("Low (Faster)", "low"),
+        questionary.Choice("None (No reasoning)", "none"),
+        questionary.Choice("Extra high (More thorough)", "xhigh"),
+        questionary.Choice("Max (Most thorough)", "max"),
     ]
     return questionary.select(
         "Select Reasoning Effort:",

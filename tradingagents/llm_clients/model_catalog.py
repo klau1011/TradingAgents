@@ -91,8 +91,6 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("GPT-5.6 Sol - Frontier model for complex professional work", "gpt-5.6-sol"),
             ("GPT-5.6 Terra - Balanced intelligence and cost", "gpt-5.6-terra"),
             ("GPT-5.5 - Previous frontier, 1M context", "gpt-5.5"),
-            ("GPT-5.4 - Previous-gen frontier, 1M context, cost-effective", "gpt-5.4"),
-            ("GPT-5.2 - Strong reasoning, cost-effective", "gpt-5.2"),
             ("GPT-5.5 Pro - Higher-compute previous-gen variant", "gpt-5.5-pro"),
         ],
     },

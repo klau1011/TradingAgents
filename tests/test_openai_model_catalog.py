@@ -17,6 +17,8 @@ def test_gpt_5_6_models_are_available_for_their_roles():
     assert deep_models[:2] == ["gpt-5.6-sol", "gpt-5.6-terra"]
     assert "gpt-5.6-sol" not in quick_models
     assert "gpt-5.6-luna" not in deep_models
+    assert "gpt-5.4" not in deep_models
+    assert "gpt-5.2" not in deep_models
 
 
 def test_gpt_5_6_models_are_the_openai_defaults():

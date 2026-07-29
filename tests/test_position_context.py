@@ -12,7 +12,10 @@ from pydantic import ValidationError
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.runner import RunnerConfig
-from web.backend.api import StartRunRequest
+
+# ``web.backend.api`` is imported lazily inside the API class below: the test job
+# installs the core deps only, and a module-level import would skip this whole
+# file — losing the graph and runner coverage that needs no fastapi.
 
 
 def _context(config: dict) -> str:
@@ -62,8 +65,15 @@ class TestRunnerConfigThreading:
 
 @pytest.mark.unit
 class TestApiBoundaryValidation:
-    def _request(self, note: str) -> StartRunRequest:
-        return StartRunRequest(
+    @staticmethod
+    def _model():
+        pytest.importorskip("fastapi")
+        from web.backend.api import StartRunRequest
+
+        return StartRunRequest
+
+    def _request(self, note: str):
+        return self._model()(
             ticker="NOW", analysis_date="2026-07-29", position_context=note
         )
 
@@ -83,6 +93,6 @@ class TestApiBoundaryValidation:
             self._request("x" * 501)
 
     def test_defaults_to_empty(self):
-        assert StartRunRequest(
+        assert self._model()(
             ticker="NOW", analysis_date="2026-07-29"
         ).position_context == ""

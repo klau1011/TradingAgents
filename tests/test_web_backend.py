@@ -19,8 +19,7 @@ def _isolated_results_dir(tmp_path, monkeypatch):
     through to the developer's real ~/.tradingagents/logs.
     """
     import tradingagents.default_config as default_config
-    from web.backend import reports as reports_mod
-    from web.backend import runs as runs_mod
+    from web.backend import reports as reports_mod, runs as runs_mod
 
     seen = set()
     for cfg in (

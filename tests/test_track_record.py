@@ -49,6 +49,36 @@ class TestTrackRecord:
         overall = get_track_record(config)["overall"]
         assert (overall["total"], overall["pending"], overall["scored"]) == (2, 1, 1)
 
+    def test_avg_alpha_credits_correct_bearish_calls(self, tmp_path):
+        """A correct Underweight has negative alpha but is a gain, not a loss.
+
+        Averaging unsigned alpha next to a direction-aware hit rate reported
+        "100% hit rate, -2% avg alpha" for a single correct bearish call.
+        """
+        config = _log(tmp_path, [
+            "[2026-01-05 | PLTR | Underweight | -2.5% | -2.0% | 5d]",
+        ])
+        overall = get_track_record(config)["overall"]
+        assert overall["hit_rate"] == 1.0
+        assert overall["avg_alpha"] == pytest.approx(0.02)  # captured, not -0.02
+
+    def test_avg_alpha_matches_backtest_mean_alpha(self, tmp_path):
+        """Same definition as backtest.summarize's mean_alpha (direction-applied)."""
+        from tradingagents.backtest import summarize
+
+        tags_and_rows = [
+            ("[2026-01-05 | A | Overweight | +3.0% | +2.0% | 5d]", "Overweight", 0.02),
+            ("[2026-01-06 | B | Underweight | -3.0% | -2.0% | 5d]", "Underweight", -0.02),
+            ("[2026-01-07 | C | Overweight | -1.0% | -1.0% | 5d]", "Overweight", -0.01),
+        ]
+        config = _log(tmp_path, [t for t, _, _ in tags_and_rows])
+        mine = get_track_record(config)["overall"]["avg_alpha"]
+        theirs = summarize([
+            {"rating": r, "alpha_return": a, "raw_return": a, "date": "2026-01-05"}
+            for _, r, a in tags_and_rows
+        ])["mean_alpha"]
+        assert mine == pytest.approx(theirs)
+
     def test_avg_alpha_is_a_fraction_like_hit_rate(self, tmp_path):
         """Both must share units — the frontend rescales each by 100.
 

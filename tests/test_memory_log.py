@@ -790,6 +790,53 @@ class TestDeferredReflection:
         assert [e["ticker"] for e in resolved] == ["NVDA"]
         assert resolved[0]["reflection"] == "NVDA held up."
 
+    def test_resolve_honours_cancellation_and_keeps_finished_work(self, tmp_path):
+        """Cancelling must stop the backlog, not run it to completion.
+
+        This phase precedes the graph (where cancellation is handled) and costs a
+        price fetch plus an LLM call per entry, so a cancelled run would otherwise
+        keep spending. Work already paid for is still written.
+        """
+        log = make_log(tmp_path)
+        for i in range(6):
+            log.store_decision(f"T{i}", "2026-01-10", DECISION_BUY)
+
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "done"
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+
+        calls = {"n": 0}
+
+        def _stop():
+            calls["n"] += 1
+            return calls["n"] > 2  # allow two entries through, then cancel
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph, should_stop=_stop)
+
+        assert mock_reflector.reflect_on_final_decision.call_count == 2
+        assert len(log.get_pending_entries()) == 4  # remainder retried next run
+        resolved = [e for e in log.load_entries() if not e["pending"]]
+        assert len(resolved) == 2, "already-paid-for work must still be written"
+
+    def test_resolve_without_should_stop_processes_everything(self, tmp_path):
+        """The predicate is optional — omitting it resolves the whole backlog."""
+        log = make_log(tmp_path)
+        for i in range(3):
+            log.store_decision(f"T{i}", "2026-01-10", DECISION_BUY)
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "done"
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+        assert log.get_pending_entries() == []
+
     def test_resolve_marks_entry_completed(self, tmp_path):
         """After resolve, get_pending_entries() is empty and the entry has a REFLECTION."""
         log = make_log(tmp_path)

@@ -236,7 +236,9 @@ class AnalysisRunner:
                 )
 
             if hasattr(graph, "_resolve_pending_entries"):
-                graph._resolve_pending_entries()
+                # Cancellable: a large backlog is a price fetch plus an LLM call
+                # per entry, and this runs before _stream does its own checks.
+                graph._resolve_pending_entries(should_stop=self.cancel_event.is_set)
 
             past_context = ""
             memory_log = getattr(graph, "memory_log", None)

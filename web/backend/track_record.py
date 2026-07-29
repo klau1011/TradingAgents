@@ -35,10 +35,17 @@ def _is_hit(entry: dict) -> bool:
 def _summarize(entries: list[dict]) -> dict[str, Any]:
     scored = [e for e in entries if _scored(e)]
     hits = [e for e in scored if _is_hit(e)]
+    # Captured alpha: signed by the rating's direction, so a correct bearish call
+    # contributes a gain rather than a loss. Averaging unsigned alpha alongside a
+    # direction-aware hit rate reports "100% hit rate, -2% avg alpha" for a single
+    # correct Underweight. Matches ``mean_alpha`` in backtest.summarize.
+    #
     # _parse_pct returns percent units ("+2.0%" -> 2.0). Divide so avg_alpha is
     # a fraction like hit_rate — the frontend rescales both by 100, so mixing
     # the two units renders 0.98% as 98%.
-    alphas = [_parse_pct(e["alpha"]) / 100 for e in scored]
+    alphas = [
+        direction(e["rating"]) * _parse_pct(e["alpha"]) / 100 for e in scored
+    ]
     return {
         "total": len(entries),
         "pending": sum(1 for e in entries if e.get("pending")),

@@ -39,7 +39,11 @@ function Overall({ stats }: { stats: TrackRecordStats }) {
         value={pct(stats.hit_rate)}
         hint={`${stats.hits}/${stats.scored} directional calls`}
       />
-      <Stat label="Avg alpha" value={pct(stats.avg_alpha, 1)} hint="vs benchmark" />
+      <Stat
+        label="Avg captured alpha"
+        value={pct(stats.avg_alpha, 1)}
+        hint="signed by call direction"
+      />
       <Stat label="Decisions" value={String(stats.total)} />
       <Stat
         label="Awaiting outcome"

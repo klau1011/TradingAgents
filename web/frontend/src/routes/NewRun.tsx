@@ -104,6 +104,11 @@ export function NewRunPage() {
       setDeep(models.deep[0][1]);
     }
     if (!opts.languages.includes(language)) setLanguage(opts.languages[0]);
+    // The backend only accepts 1/3/5, so a stale or hand-edited depth (e.g. 2)
+    // would 422 the run rather than degrade.
+    if (!opts.research_depths.some((d) => d.value === depth)) {
+      setDepth(opts.research_depths[0].value);
+    }
     const validAnalysts = analysts.filter((a) =>
       opts.analysts.some((o) => o.key === a)
     );
@@ -112,7 +117,7 @@ export function NewRunPage() {
         validAnalysts.length > 0 ? validAnalysts : opts.analysts.map((o) => o.key)
       );
     }
-  }, [opts, provider, shallow, deep, language, analysts, setProvider, setShallow, setDeep, setLanguage, setAnalysts]);
+  }, [opts, provider, shallow, deep, language, depth, analysts, setProvider, setShallow, setDeep, setLanguage, setDepth, setAnalysts]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();

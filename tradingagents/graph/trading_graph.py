@@ -327,7 +327,7 @@ class TradingAgentsGraph:
             )
             return None, None, None
 
-    def _resolve_pending_entries(self) -> None:
+    def _resolve_pending_entries(self, should_stop=None) -> None:
         """Resolve every pending log entry at the start of a new run.
 
         Fetches returns for each pending entry, generates reflections, then
@@ -343,6 +343,12 @@ class TradingAgentsGraph:
         set — without the lock they would each pay for the same reflections and
         then race to write. Whoever gets in first does the work; the others
         re-read inside the lock, find nothing pending, and return.
+
+        ``should_stop`` is an optional predicate checked between entries. This
+        phase runs before the graph — where cancellation is handled — and a large
+        backlog means a price fetch plus an LLM call per entry, so without it a
+        cancelled run keeps spending. Whatever was already resolved is still
+        written; the rest stays pending for the next run.
         """
         with LOG_LOCK:
             pending = self.memory_log.get_pending_entries()
@@ -351,6 +357,12 @@ class TradingAgentsGraph:
 
             updates = []
             for entry in pending:
+                if should_stop is not None and should_stop():
+                    logger.info(
+                        "Cancelled while resolving outcomes; %d resolved, %d left pending",
+                        len(updates), len(pending) - len(updates),
+                    )
+                    break
                 entry_ticker = entry["ticker"]
                 benchmark = self._resolve_benchmark(entry_ticker)
                 raw, alpha, days = self._fetch_returns(

@@ -33,7 +33,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
     resolve_instrument_identity,
 )
-from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.memory import LOG_LOCK, TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.ohlcv_cache import start_run_cache
 from tradingagents.dataflows.utils import safe_ticker_component
@@ -328,38 +328,55 @@ class TradingAgentsGraph:
         Resolves across all tickers, not just the one being analyzed: a ticker
         analyzed once would otherwise stay pending forever, and its call would
         never be scored.
+
+        Holds the log lock across the whole read/reflect/write cycle. Up to
+        three runs start concurrently, and all of them see the same pending
+        set — without the lock they would each pay for the same reflections and
+        then race to write. Whoever gets in first does the work; the others
+        re-read inside the lock, find nothing pending, and return.
         """
-        pending = self.memory_log.get_pending_entries()
-        if not pending:
-            return
+        with LOG_LOCK:
+            pending = self.memory_log.get_pending_entries()
+            if not pending:
+                return
 
-        updates = []
-        for entry in pending:
-            entry_ticker = entry["ticker"]
-            benchmark = self._resolve_benchmark(entry_ticker)
-            raw, alpha, days = self._fetch_returns(
-                entry_ticker, entry["date"], benchmark=benchmark,
-            )
-            if raw is None:
-                continue  # window not complete yet — try again next run
-            reflection = self.reflector.reflect_on_final_decision(
-                final_decision=entry.get("decision", ""),
-                raw_return=raw,
-                alpha_return=alpha,
-                benchmark_name=benchmark,
-                holding_days=days,
-            )
-            updates.append({
-                "ticker": entry_ticker,
-                "trade_date": entry["date"],
-                "raw_return": raw,
-                "alpha_return": alpha,
-                "holding_days": days,
-                "reflection": reflection,
-            })
+            updates = []
+            for entry in pending:
+                entry_ticker = entry["ticker"]
+                benchmark = self._resolve_benchmark(entry_ticker)
+                raw, alpha, days = self._fetch_returns(
+                    entry_ticker, entry["date"], benchmark=benchmark,
+                )
+                if raw is None:
+                    continue  # window not complete yet — try again next run
+                try:
+                    reflection = self.reflector.reflect_on_final_decision(
+                        final_decision=entry.get("decision", ""),
+                        raw_return=raw,
+                        alpha_return=alpha,
+                        benchmark_name=benchmark,
+                        holding_days=days,
+                    )
+                except Exception as e:
+                    # Scoring an old decision must never abort the analysis the
+                    # user is waiting on. Leave the entry pending and move on;
+                    # otherwise one un-reflectable entry blocks every later run.
+                    logger.warning(
+                        "Reflection failed for %s on %s (left pending): %s",
+                        entry_ticker, entry["date"], e,
+                    )
+                    continue
+                updates.append({
+                    "ticker": entry_ticker,
+                    "trade_date": entry["date"],
+                    "raw_return": raw,
+                    "alpha_return": alpha,
+                    "holding_days": days,
+                    "reflection": reflection,
+                })
 
-        if updates:
-            self.memory_log.batch_update_with_outcomes(updates)
+            if updates:
+                self.memory_log.batch_update_with_outcomes(updates)
 
     def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
         """Resolve ticker identity once and return the full instrument context.

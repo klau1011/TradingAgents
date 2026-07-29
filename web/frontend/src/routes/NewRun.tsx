@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Play, History as HistoryIcon } from "lucide-react";
@@ -7,6 +7,12 @@ import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Skeleton, SkeletonCard, SkeletonText } from "../components/ui/Skeleton";
 import { useStickyState } from "../useStickyState";
+
+// The backend keeps only MAX_RECENT_RUNS (50) runs listable, so a larger batch
+// would push its own earliest runs out of History — leaving expensive runs with
+// no way to monitor or cancel them. Kept well under that so a batch plus
+// existing history both stay visible.
+const MAX_BATCH = 25;
 
 /** Split a free-text ticker field into a de-duped, uppercased symbol list. */
 function parseTickers(raw: string): string[] {
@@ -76,6 +82,38 @@ export function NewRunPage() {
     opts?.models[provider] ?? { quick: [], deep: [] as [string, string][] };
   const keyStatus = opts?.api_key_status[provider];
 
+  // Persisted settings can name a provider or model that a later deploy removed
+  // (this repo trims its model catalog — see the GPT-5.6 change). A controlled
+  // <select> would render its first option while state still held the stale
+  // value, so submitting would send a model the runner can't construct. Snap any
+  // stale value back to a real one as soon as the catalog loads.
+  useEffect(() => {
+    if (!opts) return;
+    if (!opts.providers.includes(provider)) {
+      setProvider(opts.providers[0]);
+      return; // provider change re-runs this with the right catalog
+    }
+    const models = opts.models[provider];
+    if (!models) return;
+    const has = (list: [string, string][], v: string) =>
+      list.some(([, value]) => value === v);
+    if (models.quick.length > 0 && !has(models.quick, shallow)) {
+      setShallow(models.quick[0][1]);
+    }
+    if (models.deep.length > 0 && !has(models.deep, deep)) {
+      setDeep(models.deep[0][1]);
+    }
+    if (!opts.languages.includes(language)) setLanguage(opts.languages[0]);
+    const validAnalysts = analysts.filter((a) =>
+      opts.analysts.some((o) => o.key === a)
+    );
+    if (validAnalysts.length !== analysts.length) {
+      setAnalysts(
+        validAnalysts.length > 0 ? validAnalysts : opts.analysts.map((o) => o.key)
+      );
+    }
+  }, [opts, provider, shallow, deep, language, analysts, setProvider, setShallow, setDeep, setLanguage, setAnalysts]);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
@@ -83,6 +121,14 @@ export function NewRunPage() {
     try {
       if (tickers.length === 0) {
         setErr("Enter at least one ticker.");
+        return;
+      }
+      if (tickers.length > MAX_BATCH) {
+        setErr(
+          `${tickers.length} tickers exceeds the ${MAX_BATCH}-run batch limit — ` +
+            `beyond that, earlier runs drop out of History and can't be monitored ` +
+            `or cancelled. Split it into smaller batches.`
+        );
         return;
       }
       // A position note describes one holding, so it only applies to a single

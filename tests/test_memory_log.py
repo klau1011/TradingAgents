@@ -432,17 +432,57 @@ class TestDeferredReflection:
         assert msft["ticker"] == "MSFT" and msft["pending"] is True
 
     def test_update_atomic_write(self, tmp_path):
-        """A pre-existing .tmp file is overwritten; the log is correctly updated."""
+        """The write leaves no temp file behind and a stale one can't break it.
+
+        Temp names are unique per pid+thread, so an unrelated leftover is simply
+        ignored rather than being moved into place over the real log.
+        """
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
         stale_tmp = tmp_path / "trading_memory.tmp"
-        stale_tmp.write_text("GARBAGE CONTENT — should be overwritten", encoding="utf-8")
+        stale_tmp.write_text("GARBAGE CONTENT", encoding="utf-8")
         log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Correct.")
-        assert not stale_tmp.exists()
         entries = log.load_entries()
         assert len(entries) == 1
         assert entries[0]["reflection"] == "Correct."
         assert entries[0]["pending"] is False
+        # No temp file of ours survives the write.
+        assert [p.name for p in tmp_path.glob("*.tmp")] == ["trading_memory.tmp"]
+
+    def test_concurrent_writers_do_not_lose_updates(self, tmp_path):
+        """Three workers resolving at once must not drop each other's writes.
+
+        The dashboard runs up to three analyses as threads in one process, and
+        each resolves pending entries at start-up. With a shared temp path and no
+        lock, one worker's replace() moves another's file into place and the
+        loser raises FileNotFoundError.
+        """
+        import threading
+
+        log = make_log(tmp_path)
+        tickers = [f"TICK{i}" for i in range(12)]
+        for t in tickers:
+            log.store_decision(t, "2026-01-10", DECISION_BUY)
+
+        errors = []
+
+        def resolve(ticker):
+            try:
+                log.update_with_outcome(ticker, "2026-01-10", 0.01, 0.01, 5, f"r-{ticker}")
+            except Exception as e:  # pragma: no cover - only on a regression
+                errors.append(e)
+
+        threads = [threading.Thread(target=resolve, args=(t,)) for t in tickers]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        assert errors == []
+        entries = log.load_entries()
+        assert len(entries) == len(tickers)
+        assert log.get_pending_entries() == [], "an update was lost to a race"
+        assert {e["reflection"] for e in entries} == {f"r-{t}" for t in tickers}
 
     def test_update_noop_when_no_log_path(self):
         log = TradingMemoryLog(config=None)
@@ -691,6 +731,41 @@ class TestDeferredReflection:
         TradingAgentsGraph._resolve_pending_entries(mock_graph)
         assert log.get_pending_entries() == []
         assert {e["ticker"] for e in log.load_entries()} == {"AAPL", "NVDA"}
+
+    def test_reflection_failure_leaves_entry_pending_without_aborting(self, tmp_path):
+        """A bad old entry must not block the analysis the user is waiting on.
+
+        Resolution runs at the start of every run, so an unhandled provider error
+        on one stale entry would abort each subsequent run before its pipeline
+        started — and retry the same entry forever.
+        """
+        log = make_log(tmp_path)
+        # The reflector only receives the decision text, so identify the entries
+        # through it rather than by ticker.
+        log.store_decision("AAPL", "2026-01-10", "Rating: Buy\nAAPL thesis.")
+        log.store_decision("NVDA", "2026-01-10", "Rating: Buy\nNVDA thesis.")
+
+        def _reflect(**kw):
+            if "AAPL" in kw["final_decision"]:
+                raise RuntimeError("provider 503")
+            return "NVDA held up."
+
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.side_effect = _reflect
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+
+        # Must not raise.
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+
+        pending = {e["ticker"] for e in log.get_pending_entries()}
+        assert pending == {"AAPL"}, "failed entry should stay pending"
+        resolved = [e for e in log.load_entries() if not e["pending"]]
+        assert [e["ticker"] for e in resolved] == ["NVDA"]
+        assert resolved[0]["reflection"] == "NVDA held up."
 
     def test_resolve_marks_entry_completed(self, tmp_path):
         """After resolve, get_pending_entries() is empty and the entry has a REFLECTION."""

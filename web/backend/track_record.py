@@ -35,7 +35,10 @@ def _is_hit(entry: dict) -> bool:
 def _summarize(entries: list[dict]) -> dict[str, Any]:
     scored = [e for e in entries if _scored(e)]
     hits = [e for e in scored if _is_hit(e)]
-    alphas = [_parse_pct(e["alpha"]) for e in scored]
+    # _parse_pct returns percent units ("+2.0%" -> 2.0). Divide so avg_alpha is
+    # a fraction like hit_rate — the frontend rescales both by 100, so mixing
+    # the two units renders 0.98% as 98%.
+    alphas = [_parse_pct(e["alpha"]) / 100 for e in scored]
     return {
         "total": len(entries),
         "pending": sum(1 for e in entries if e.get("pending")),
@@ -60,7 +63,9 @@ def get_track_record(config: dict | None = None) -> dict[str, Any]:
         {
             "ticker": ticker,
             **_summarize(rows),
-            # Most recent first so a rating flip is visible at a glance.
+            # Most recent analysis date first so a rating flip reads in order.
+            # Sort by date, not log position: analysing a historical date after
+            # a current one appends it last but it belongs earlier.
             "entries": [
                 {
                     "date": e["date"],
@@ -71,7 +76,7 @@ def get_track_record(config: dict | None = None) -> dict[str, Any]:
                     "holding": e["holding"],
                     "reflection": e["reflection"],
                 }
-                for e in reversed(rows)
+                for e in sorted(rows, key=lambda e: e["date"], reverse=True)
             ],
         }
         for ticker, rows in by_ticker.items()

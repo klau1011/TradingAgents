@@ -49,6 +49,33 @@ class TestTrackRecord:
         overall = get_track_record(config)["overall"]
         assert (overall["total"], overall["pending"], overall["scored"]) == (2, 1, 1)
 
+    def test_avg_alpha_is_a_fraction_like_hit_rate(self, tmp_path):
+        """Both must share units — the frontend rescales each by 100.
+
+        `_parse_pct` yields percent units (2.0 for "+2.0%"), so returning it raw
+        rendered an average alpha of 0.98% as 98%.
+        """
+        config = _log(tmp_path, [
+            "[2026-01-05 | NOW | Overweight | +3.0% | +2.0% | 5d]",
+            "[2026-01-06 | NOW | Overweight | +5.0% | +4.0% | 5d]",
+        ])
+        overall = get_track_record(config)["overall"]
+        assert overall["avg_alpha"] == pytest.approx(0.03)  # mean of 2% and 4%
+        assert overall["hit_rate"] == 1.0
+
+    def test_entries_sorted_by_analysis_date_not_log_order(self, tmp_path):
+        """A historical analysis run after a current one still sorts earlier."""
+        config = _log(tmp_path, [
+            "[2026-03-01 | NOW | Underweight | -1.0% | -1.0% | 5d]",
+            # Appended later, but describes an earlier date.
+            "[2026-01-05 | NOW | Overweight | +1.0% | +1.0% | 5d]",
+            "[2026-02-01 | NOW | Hold | +0.0% | +0.0% | 5d]",
+        ])
+        entries = get_track_record(config)["tickers"][0]["entries"]
+        assert [e["date"] for e in entries] == [
+            "2026-03-01", "2026-02-01", "2026-01-05",
+        ]
+
     def test_no_scored_calls_yields_null_not_zero(self, tmp_path):
         """A null hit rate must not render as 0% — they mean different things."""
         config = _log(tmp_path, ["[2026-01-05 | NBIS | Underweight | pending]"])

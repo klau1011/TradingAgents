@@ -81,6 +81,7 @@ class RunnerConfig:
     google_thinking_level: str | None = None
     openai_reasoning_effort: str | None = None
     anthropic_effort: str | None = None
+    position_context: str = ""
     extra_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -118,6 +119,7 @@ class RunnerConfig:
         cfg["openai_reasoning_effort"] = self.openai_reasoning_effort
         cfg["anthropic_effort"] = self.anthropic_effort
         cfg["output_language"] = self.output_language
+        cfg["position_context"] = self.position_context
         cfg.update(self.extra_config)
         return cfg
 
@@ -234,7 +236,7 @@ class AnalysisRunner:
                 )
 
             if hasattr(graph, "_resolve_pending_entries"):
-                graph._resolve_pending_entries(self.config.ticker)
+                graph._resolve_pending_entries()
 
             past_context = ""
             memory_log = getattr(graph, "memory_log", None)

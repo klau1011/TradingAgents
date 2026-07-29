@@ -109,6 +109,14 @@ _REQUIRED_DECISION_FIELDS = (
     "investment_thesis",
 )
 
+# Optional strings — absent in reports written before the field existed, so
+# they must never be promoted to required.
+_OPTIONAL_DECISION_STR_FIELDS = (
+    "time_horizon",
+    "confidence",
+    "what_would_change_it",
+)
+
 
 def _load_validated_decision_json(decision_json: Path) -> dict[str, Any] | None:
     """Load and validate decision.json, returning a normalized dict or None."""
@@ -153,15 +161,17 @@ def _load_validated_decision_json(decision_json: Path) -> dict[str, Any] | None:
         return None
     normalized["price_target"] = price_target
 
-    time_horizon = payload.get("time_horizon")
-    if time_horizon is not None and not isinstance(time_horizon, str):
-        logger.warning(
-            "Ignoring malformed %s: invalid 'time_horizon' type %s",
-            decision_json,
-            type(time_horizon).__name__,
-        )
-        return None
-    normalized["time_horizon"] = time_horizon.strip() if isinstance(time_horizon, str) else None
+    for field in _OPTIONAL_DECISION_STR_FIELDS:
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            logger.warning(
+                "Ignoring malformed %s: invalid '%s' type %s",
+                decision_json,
+                field,
+                type(value).__name__,
+            )
+            return None
+        normalized[field] = value.strip() if isinstance(value, str) else None
 
     return normalized
 

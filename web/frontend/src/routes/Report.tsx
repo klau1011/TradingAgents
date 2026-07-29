@@ -26,7 +26,14 @@ type DecisionDetail = {
   investment_thesis: string;
   price_target: number | null;
   time_horizon: string | null;
+  confidence: string | null;
+  what_would_change_it: string | null;
 };
+
+/** Optional string field: null when absent, blank, or the wrong type. */
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
 
 function normalizeDecisionDetail(detail: unknown): DecisionDetail | null {
   if (!detail || typeof detail !== "object") {
@@ -68,10 +75,9 @@ function normalizeDecisionDetail(detail: unknown): DecisionDetail | null {
     executive_summary: candidate.executive_summary.trim(),
     investment_thesis: candidate.investment_thesis.trim(),
     price_target: typeof priceTarget === "number" ? priceTarget : null,
-    time_horizon:
-      typeof timeHorizon === "string" && timeHorizon.trim()
-        ? timeHorizon.trim()
-        : null,
+    time_horizon: optionalString(timeHorizon),
+    confidence: optionalString(candidate.confidence),
+    what_would_change_it: optionalString(candidate.what_would_change_it),
   };
 }
 
@@ -148,8 +154,20 @@ export function ReportPage() {
             </Link>
           </div>
           {decisionDetail &&
-            (decisionDetail.price_target !== null || decisionDetail.time_horizon) && (
+            (decisionDetail.price_target !== null ||
+              decisionDetail.time_horizon ||
+              decisionDetail.confidence) && (
               <dl className="flex flex-wrap gap-4">
+                {decisionDetail.confidence && (
+                  <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+                    <dt className="font-display text-nav text-inverse-fg/60">
+                      Confidence
+                    </dt>
+                    <dd className="font-display text-feature font-medium capitalize">
+                      {decisionDetail.confidence}
+                    </dd>
+                  </div>
+                )}
                 {decisionDetail.price_target !== null && (
                   <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
                     <dt className="font-display text-nav text-inverse-fg/60">
@@ -172,6 +190,16 @@ export function ReportPage() {
                 )}
               </dl>
             )}
+          {decisionDetail?.what_would_change_it && (
+            <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+              <p className="font-display text-nav text-inverse-fg/60">
+                What Would Change It
+              </p>
+              <p className="mt-1 text-inverse-fg/90">
+                {decisionDetail.what_would_change_it}
+              </p>
+            </div>
+          )}
         </div>
       </section>
 

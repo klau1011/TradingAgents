@@ -529,7 +529,11 @@ class TestDeferredReflection:
         assert raw is None and alpha is None and days is None
 
     def test_fetch_returns_spy_shorter_than_stock(self):
-        """SPY having fewer rows than the stock must not raise IndexError."""
+        """A short benchmark series defers the grade instead of truncating it.
+
+        Must not raise IndexError, and must not grade a 5-day call on 2 days of
+        benchmark data.
+        """
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         spy_prices   = [400.0, 402.0, 403.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
@@ -540,8 +544,34 @@ class TestDeferredReflection:
                 return m
             mock_ticker_cls.side_effect = _make_ticker
             raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
-        assert raw is not None and alpha is not None and days is not None
-        assert days == 2
+        assert (raw, alpha, days) == (None, None, None)
+
+    def test_fetch_returns_defers_partial_window(self):
+        """Re-running a ticker the next day must not grade the prior call on 1 day.
+
+        Regression for the `[... | +3.8% | +5.0% | 1d]` entries: partial windows
+        were graded and their reflections fed back into later analyses.
+        """
+        prices = [100.0, 102.0]  # trade date + 1 bar
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            m = MagicMock()
+            m.history.return_value = _price_df(prices)
+            mock_ticker_cls.return_value = m
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NOW", "2026-06-22")
+        assert (raw, alpha, days) == (None, None, None)
+
+    def test_fetch_returns_grades_full_window_only(self):
+        """Exactly holding_days+1 bars resolves, and always at the full horizon."""
+        prices = [100.0, 101.0, 102.0, 103.0, 104.0, 110.0]
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            m = MagicMock()
+            m.history.return_value = _price_df(prices)
+            mock_ticker_cls.return_value = m
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NOW", "2026-06-22")
+        assert days == 5
+        assert raw == pytest.approx(0.10)  # measured to the last bar, not an earlier one
 
     # TradingAgentsGraph._resolve_benchmark — picks index for alpha calc
 
@@ -642,16 +672,25 @@ class TestDeferredReflection:
 
     # TradingAgentsGraph._resolve_pending_entries
 
-    def test_resolve_skips_other_tickers(self, tmp_path):
-        """Pending AAPL entry is not resolved when the run is for NVDA."""
+    def test_resolve_covers_every_pending_ticker(self, tmp_path):
+        """A ticker analyzed once still gets scored on a later run of another ticker.
+
+        Scoping resolution to the ticker being analyzed strands single-run
+        tickers as pending forever.
+        """
         log = make_log(tmp_path)
         log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
+        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "Held up."
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
         mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
-        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
-        mock_graph._fetch_returns.assert_not_called()
-        assert len(log.get_pending_entries()) == 1
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+        assert log.get_pending_entries() == []
+        assert {e["ticker"] for e in log.load_entries()} == {"AAPL", "NVDA"}
 
     def test_resolve_marks_entry_completed(self, tmp_path):
         """After resolve, get_pending_entries() is empty and the entry has a REFLECTION."""
@@ -662,8 +701,9 @@ class TestDeferredReflection:
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
         mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
         mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
-        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
         assert log.get_pending_entries() == []
         entries = log.load_entries()
         assert len(entries) == 1

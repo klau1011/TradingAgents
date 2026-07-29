@@ -276,14 +276,20 @@ class TradingAgentsGraph:
 
         ``benchmark`` is the index used as the alpha baseline (resolved by the
         caller via ``_resolve_benchmark``). Returns ``(raw_return, alpha_return,
-        actual_holding_days)`` or ``(None, None, None)`` if price data is
-        unavailable (too recent, delisted, or network error).
+        holding_days)`` or ``(None, None, None)`` if the full holding window is
+        not yet available (too recent, delisted, or network error).
+
+        The window is all-or-nothing on purpose: grading a call on however many
+        bars happen to exist turns a 1-day wobble into a stored verdict, and
+        that verdict is re-injected into every later analysis of the ticker.
         """
         from tradingagents.dataflows.symbol_utils import normalize_symbol
 
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
+            # Buffer must cover weekends AND holiday clusters: too tight and a
+            # trade date near Christmas never accumulates holding_days bars.
+            end = start + timedelta(days=holding_days + 10)
             end_str = end.strftime("%Y-%m-%d")
 
             # Normalize so the realized-return lookup hits the same instrument
@@ -292,20 +298,19 @@ class TradingAgentsGraph:
             stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
             bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
 
-            if len(stock) < 2 or len(bench) < 2:
-                return None, None, None
+            if min(len(stock), len(bench)) - 1 < holding_days:
+                return None, None, None  # window not complete yet — retried next run
 
-            actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
             raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
+                (stock["Close"].iloc[holding_days] - stock["Close"].iloc[0])
                 / stock["Close"].iloc[0]
             )
             bench_ret = float(
-                (bench["Close"].iloc[actual_days] - bench["Close"].iloc[0])
+                (bench["Close"].iloc[holding_days] - bench["Close"].iloc[0])
                 / bench["Close"].iloc[0]
             )
             alpha = raw - bench_ret
-            return raw, alpha, actual_days
+            return raw, alpha, holding_days
         except Exception as e:
             logger.warning(
                 "Could not resolve outcome for %s on %s vs %s (will retry next run): %s",
@@ -313,36 +318,39 @@ class TradingAgentsGraph:
             )
             return None, None, None
 
-    def _resolve_pending_entries(self, ticker: str) -> None:
-        """Resolve pending log entries for ticker at the start of a new run.
+    def _resolve_pending_entries(self) -> None:
+        """Resolve every pending log entry at the start of a new run.
 
-        Fetches returns for each same-ticker pending entry, generates reflections,
-        then writes all updates in a single atomic batch write to avoid redundant I/O.
-        Skips entries whose price data is not yet available (too recent or delisted).
+        Fetches returns for each pending entry, generates reflections, then
+        writes all updates in a single atomic batch write to avoid redundant
+        I/O.  Skips entries whose holding window has not completed yet.
 
-        Trade-off: only same-ticker entries are resolved per run.  Entries for
-        other tickers accumulate until that ticker is run again.
+        Resolves across all tickers, not just the one being analyzed: a ticker
+        analyzed once would otherwise stay pending forever, and its call would
+        never be scored.
         """
-        pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
+        pending = self.memory_log.get_pending_entries()
         if not pending:
             return
 
-        benchmark = self._resolve_benchmark(ticker)
         updates = []
         for entry in pending:
+            entry_ticker = entry["ticker"]
+            benchmark = self._resolve_benchmark(entry_ticker)
             raw, alpha, days = self._fetch_returns(
-                ticker, entry["date"], benchmark=benchmark,
+                entry_ticker, entry["date"], benchmark=benchmark,
             )
             if raw is None:
-                continue  # price not available yet — try again next run
+                continue  # window not complete yet — try again next run
             reflection = self.reflector.reflect_on_final_decision(
                 final_decision=entry.get("decision", ""),
                 raw_return=raw,
                 alpha_return=alpha,
                 benchmark_name=benchmark,
+                holding_days=days,
             )
             updates.append({
-                "ticker": ticker,
+                "ticker": entry_ticker,
                 "trade_date": entry["date"],
                 "raw_return": raw,
                 "alpha_return": alpha,
@@ -361,9 +369,25 @@ class TradingAgentsGraph:
         hallucinating one from the price chart (#814). Both the propagate()
         path and the CLI call this so the resolved identity reaches the whole
         graph regardless of entry point.
+
+        An optional ``position_context`` note from config is appended here for
+        the same reason: this is the one place every entry point funnels
+        through, so the holder's actual exposure reaches every agent without
+        threading a new argument through the graph.
         """
         identity = resolve_instrument_identity(ticker)
-        return build_instrument_context(ticker, asset_type, identity)
+        context = build_instrument_context(ticker, asset_type, identity)
+
+        position = str(self.config.get("position_context") or "").strip()
+        if position:
+            context += (
+                f" The holder's current position: {position}. "
+                "Use this only to size the recommendation and frame the action "
+                "(add, trim, hold, exit) — it is not evidence about the "
+                "instrument. Do not let an existing position, its cost basis, "
+                "or an unrealized gain or loss bias the rating."
+            )
+        return context
 
     def _run_signature(self, asset_type: str) -> str:
         """Graph-shape inputs that must invalidate a checkpoint if changed.
@@ -392,7 +416,7 @@ class TradingAgentsGraph:
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+        self._resolve_pending_entries()
 
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):

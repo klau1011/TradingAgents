@@ -6,6 +6,17 @@ import { api } from "../api";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Skeleton, SkeletonCard, SkeletonText } from "../components/ui/Skeleton";
+import { useStickyState } from "../useStickyState";
+
+/** Split a free-text ticker field into a de-duped, uppercased symbol list. */
+function parseTickers(raw: string): string[] {
+  const seen = new Set<string>();
+  for (const part of raw.split(/[,\s]+/)) {
+    const t = part.trim().toUpperCase();
+    if (t) seen.add(t);
+  }
+  return [...seen];
+}
 
 export function NewRunPage() {
   const navigate = useNavigate();
@@ -35,25 +46,31 @@ export function NewRunPage() {
   }, [runs.data, reports.data]);
 
   const today = new Date().toISOString().slice(0, 10);
-  const [ticker, setTicker] = useState("SPY");
+  // Ticker, date and position note stay per-run: restoring a stale one would
+  // silently analyze the wrong thing. Everything else is a setting you re-pick
+  // identically every time, so it persists.
+  const [ticker, setTicker] = useState("");
   const [date, setDate] = useState(today);
-  const [analysts, setAnalysts] = useState<string[]>([
+  const [positionContext, setPositionContext] = useState("");
+  const [analysts, setAnalysts] = useStickyState<string[]>("analysts", [
     "market",
     "social",
     "news",
     "fundamentals",
   ]);
-  const [provider, setProvider] = useState("openai");
-  const [shallow, setShallow] = useState("gpt-5.6-luna");
-  const [deep, setDeep] = useState("gpt-5.6-sol");
-  const [depth, setDepth] = useState(1);
-  const [language, setLanguage] = useState("English");
+  const [provider, setProvider] = useStickyState("provider", "openai");
+  const [shallow, setShallow] = useStickyState("shallow", "gpt-5.6-luna");
+  const [deep, setDeep] = useStickyState("deep", "gpt-5.6-sol");
+  const [depth, setDepth] = useStickyState("depth", 1);
+  const [language, setLanguage] = useStickyState("language", "English");
   // Provider-specific thinking depth. Mirrors the CLI's Step 8.
-  const [openaiEffort, setOpenaiEffort] = useState("medium");
-  const [anthropicEffort, setAnthropicEffort] = useState("high");
-  const [googleThinking, setGoogleThinking] = useState("high");
+  const [openaiEffort, setOpenaiEffort] = useStickyState("openaiEffort", "medium");
+  const [anthropicEffort, setAnthropicEffort] = useStickyState("anthropicEffort", "high");
+  const [googleThinking, setGoogleThinking] = useStickyState("googleThinking", "high");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const tickers = parseTickers(ticker);
 
   const providerModels =
     opts?.models[provider] ?? { quick: [], deep: [] as [string, string][] };
@@ -64,23 +81,51 @@ export function NewRunPage() {
     setErr(null);
     setSubmitting(true);
     try {
-      const run = await api.startRun({
-        ticker,
-        analysis_date: date,
-        analysts,
-        research_depth: depth,
-        llm_provider: provider,
-        shallow_thinker: shallow,
-        deep_thinker: deep,
-        output_language: language,
-        openai_reasoning_effort:
-          provider === "openai" ? openaiEffort : null,
-        anthropic_effort:
-          provider === "anthropic" ? anthropicEffort : null,
-        google_thinking_level:
-          provider === "google" ? googleThinking : null,
-      });
-      navigate(`/runs/${run.run_id}`);
+      if (tickers.length === 0) {
+        setErr("Enter at least one ticker.");
+        return;
+      }
+      // A position note describes one holding, so it only applies to a single
+      // ticker — never fan the same note out across a batch.
+      const note = tickers.length === 1 ? positionContext : "";
+      const started = [];
+      const failed = [];
+      for (const t of tickers) {
+        try {
+          started.push(
+            await api.startRun({
+              ticker: t,
+              analysis_date: date,
+              analysts,
+              research_depth: depth,
+              llm_provider: provider,
+              shallow_thinker: shallow,
+              deep_thinker: deep,
+              output_language: language,
+              position_context: note,
+              openai_reasoning_effort:
+                provider === "openai" ? openaiEffort : null,
+              anthropic_effort:
+                provider === "anthropic" ? anthropicEffort : null,
+              google_thinking_level:
+                provider === "google" ? googleThinking : null,
+            })
+          );
+        } catch (e) {
+          // One bad symbol must not strand the rest of the batch.
+          failed.push(`${t} (${e})`);
+        }
+      }
+      if (failed.length > 0) {
+        // Stay put so the message survives — navigating away would discard it.
+        setErr(
+          `Started ${started.length} of ${tickers.length}. Not started: ${failed.join("; ")}`
+        );
+        return;
+      }
+      // Three run concurrently and the rest queue, so a batch is better watched
+      // from the history list than from any one run's page.
+      navigate(started.length === 1 ? `/runs/${started[0].run_id}` : "/history");
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -125,7 +170,7 @@ export function NewRunPage() {
                 value={ticker}
                 onChange={(e) => setTicker(e.target.value.toUpperCase())}
                 className={inputCls}
-                placeholder="SPY, CNC.TO, 7203.T"
+                placeholder="NOW, or MSFT META PLTR for a batch"
                 list="ticker-suggestions"
                 autoComplete="off"
                 spellCheck={false}
@@ -136,6 +181,11 @@ export function NewRunPage() {
                   <option key={t} value={t} />
                 ))}
               </datalist>
+              {tickers.length > 1 && (
+                <p className="mt-2 text-body-em text-muted">
+                  {tickers.length} runs will be queued: {tickers.join(", ")}
+                </p>
+              )}
             </Field>
             <Field label="Analysis date">
               <input
@@ -148,6 +198,25 @@ export function NewRunPage() {
               />
             </Field>
           </div>
+
+          {tickers.length <= 1 && (
+            <Field label="Your position (optional)">
+              <textarea
+                value={positionContext}
+                onChange={(e) => setPositionContext(e.target.value)}
+                className={inputCls}
+                rows={2}
+                maxLength={500}
+                placeholder="200 sh @ $412, ~6% of book, held since March"
+                spellCheck={false}
+              />
+              <p className="mt-2 text-body-em text-muted">
+                Lets the agents size the action (add, trim, exit) instead of
+                only answering whether the security is worth owning. Leave
+                blank for a position-agnostic read.
+              </p>
+            </Field>
+          )}
 
           <Field label="Analysts">
             <div className="flex flex-wrap gap-3">

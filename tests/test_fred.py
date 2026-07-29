@@ -150,6 +150,22 @@ class FredFormattingTests(unittest.TestCase):
         self.assertEqual(obs_params["observation_end"], "2025-09-30")
         self.assertEqual(obs_params["observation_start"], "2025-07-02")  # 90d back
 
+    def test_vintage_is_pinned_to_curr_date(self):
+        """Without a realtime window FRED returns today's revised figures, and
+        observation_end filters by the period a figure describes rather than
+        when it was published — so January CPI leaks into a mid-January date."""
+        captured = {}
+
+        def _capture(path, params):
+            captured[path] = params
+            return _META if path == "series" else _OBS
+
+        with mock.patch.object(fred, "_request", side_effect=_capture):
+            fred.get_macro_data("cpi", "2025-09-30", 90)
+        obs_params = captured["series/observations"]
+        self.assertEqual(obs_params["realtime_start"], "2025-09-30")
+        self.assertEqual(obs_params["realtime_end"], "2025-09-30")
+
 
 @pytest.mark.unit
 class FredRoutingTests(unittest.TestCase):

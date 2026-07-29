@@ -101,6 +101,38 @@ export interface PortfolioDecisionDetail {
   investment_thesis: string;
   price_target: number | null;
   time_horizon: string | null;
+  confidence: string | null;
+  what_would_change_it: string | null;
+}
+
+export interface TrackRecordStats {
+  total: number;
+  pending: number;
+  scored: number;
+  hits: number;
+  /** null when nothing has been scored yet — not the same as 0%. */
+  hit_rate: number | null;
+  avg_alpha: number | null;
+}
+
+export interface TrackRecordEntry {
+  date: string;
+  rating: string;
+  pending: boolean;
+  raw: string | null;
+  alpha: string | null;
+  holding: string | null;
+  reflection: string;
+}
+
+export interface TrackRecordTicker extends TrackRecordStats {
+  ticker: string;
+  entries: TrackRecordEntry[];
+}
+
+export interface TrackRecord {
+  overall: TrackRecordStats;
+  tickers: TrackRecordTicker[];
 }
 
 export interface ReportDetail {

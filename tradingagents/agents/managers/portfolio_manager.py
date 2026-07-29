@@ -46,11 +46,13 @@ def create_portfolio_manager(llm):
 ---
 
 **Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add to position
-- **Overweight**: Favorable outlook, gradually increase exposure
-- **Hold**: Maintain current position, no action needed
-- **Underweight**: Reduce exposure, take partial profits
-- **Sell**: Exit position or avoid entry
+- **Buy**: Strong conviction to enter or add — the bull thesis survived the strongest bear objection and a named catalyst with a timeline supports it
+- **Overweight**: Favorable outlook that does not clear the Buy bar; gradually increase exposure
+- **Hold**: Evidence genuinely balanced, or the deciding fact is missing; no action
+- **Underweight**: Cautious outlook that does not clear the Sell bar; reduce exposure, take partial profits
+- **Sell**: Strong conviction to exit or avoid — the bear thesis survived the strongest bull objection and a named catalyst with a timeline supports it
+
+Buy and Sell are conviction calls and must clear that bar; Overweight and Underweight are the ordinary directional ratings. Hold is a legitimate answer when the deciding evidence is absent — but do not use it to dodge a side the evidence supports.
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
@@ -61,7 +63,9 @@ def create_portfolio_manager(llm):
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts. State your confidence (low/medium/high) in the rating based on the strength of the evidence and how much the risk analysts agreed.{get_language_instruction()}"""
+Be decisive and ground every conclusion in specific evidence from the analysts. State your confidence (low/medium/high) in the rating based on the strength of the evidence and how much the risk analysts agreed.
+
+The risk analysts were each assigned a stance, so weigh the substance of their arguments rather than their conviction. Finally, name what would change this rating: the specific observable development that would move it one tier more bullish, and the one that would move it one tier more bearish. Make them concrete enough to check on a later re-analysis.{get_language_instruction()}"""
 
         final_trade_decision, decision_obj = invoke_structured_or_freetext_with_object(
             structured_llm,

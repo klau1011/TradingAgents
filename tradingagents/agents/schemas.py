@@ -51,6 +51,21 @@ class PortfolioRating(str, Enum):
     SELL = "Sell"
 
 
+# Shared by ResearchPlan.recommendation and PortfolioDecision.rating so the two
+# stages can't drift apart. Without explicit bars for the outer tiers, a
+# one-sided "avoid Hold" nudge collapses the whole scale into Overweight.
+RATING_BAR_GUIDANCE = (
+    "Exactly one of Buy / Overweight / Hold / Underweight / Sell. "
+    "Buy and Sell are conviction calls: reserve them for cases where the winning "
+    "thesis survives the other side's single strongest objection AND a named "
+    "catalyst with a timeline supports it. Overweight and Underweight are the "
+    "ordinary directional ratings for a lean that does not clear that bar. "
+    "Hold means the evidence is genuinely balanced or the deciding fact is "
+    "missing — it is a real answer, not a way to avoid taking a side the "
+    "evidence supports."
+)
+
+
 class TraderAction(str, Enum):
     """3-tier transaction direction used by the Trader.
 
@@ -80,12 +95,7 @@ class ResearchPlan(BaseModel):
     """
 
     recommendation: PortfolioRating = Field(
-        description=(
-            "The investment recommendation. Exactly one of Buy / Overweight / "
-            "Hold / Underweight / Sell. Reserve Hold for situations where the "
-            "evidence on both sides is genuinely balanced; otherwise commit to "
-            "the side with the stronger arguments."
-        ),
+        description="The investment recommendation. " + RATING_BAR_GUIDANCE,
     )
     rationale: str = Field(
         description=(
@@ -195,10 +205,7 @@ class PortfolioDecision(BaseModel):
     """
 
     rating: PortfolioRating = Field(
-        description=(
-            "The final position rating. Exactly one of Buy / Overweight / Hold / "
-            "Underweight / Sell, picked based on the analysts' debate."
-        ),
+        description="The final position rating. " + RATING_BAR_GUIDANCE,
     )
     confidence: Literal["low", "medium", "high"] = Field(
         default="medium",
@@ -229,6 +236,16 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    what_would_change_it: str = Field(
+        default="",
+        description=(
+            "Two sentences: the specific, observable development that would move "
+            "this rating one tier more bullish, and the one that would move it one "
+            "tier more bearish. Name concrete triggers a reader could check on a "
+            "later re-analysis (a price level, a metric threshold, a dated event) "
+            "rather than generic risks."
+        ),
+    )
 
     @field_validator("price_target", mode="before")
     @classmethod
@@ -257,6 +274,8 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.what_would_change_it:
+        parts.extend(["", f"**What Would Change It**: {decision.what_would_change_it}"])
     return "\n".join(parts)
 
 

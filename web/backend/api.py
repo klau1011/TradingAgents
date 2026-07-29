@@ -22,6 +22,7 @@ from .reports import (
     list_reports,
 )
 from .runs import registry
+from .track_record import get_track_record
 
 router = APIRouter()
 
@@ -32,6 +33,7 @@ router = APIRouter()
 
 
 _TICKER_RE = re.compile(r"^[A-Z0-9._\-^=]{1,32}$")
+_MAX_POSITION_CONTEXT = 500
 _VALID_PROVIDERS = set(MODEL_OPTIONS.keys()) | {"openrouter", "azure"}
 
 
@@ -48,6 +50,7 @@ class StartRunRequest(BaseModel):
     google_thinking_level: str | None = None
     openai_reasoning_effort: str | None = None
     anthropic_effort: str | None = None
+    position_context: str = ""
 
     @field_validator("ticker")
     @classmethod
@@ -92,6 +95,21 @@ class StartRunRequest(BaseModel):
         v = v.lower()
         if v not in _VALID_PROVIDERS:
             raise ValueError(f"Unsupported provider: {v}")
+        return v
+
+    @field_validator("position_context")
+    @classmethod
+    def _v_position_context(cls, v: str) -> str:
+        """Free text that lands in an LLM prompt — bound it at the boundary.
+
+        Strips control characters (which can smuggle prompt structure) and caps
+        the length so a paste can't blow up every agent's context.
+        """
+        v = "".join(c for c in v if c == "\n" or c >= " ").strip()
+        if len(v) > _MAX_POSITION_CONTEXT:
+            raise ValueError(
+                f"position_context must be at most {_MAX_POSITION_CONTEXT} characters"
+            )
         return v
 
 
@@ -166,6 +184,7 @@ async def start_run(payload: StartRunRequest, response: Response) -> dict[str, A
         google_thinking_level=payload.google_thinking_level,
         openai_reasoning_effort=payload.openai_reasoning_effort,
         anthropic_effort=payload.anthropic_effort,
+        position_context=payload.position_context,
     )
     record = await registry.submit(config)
     response.headers["Location"] = f"/api/runs/{record.run_id}"
@@ -271,3 +290,14 @@ def report_decision(folder: str) -> dict[str, Any]:
     if decision is None:
         raise HTTPException(status_code=404, detail="Structured decision not available")
     return decision
+
+
+# ---------------------------------------------------------------------------
+# Track record
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/track-record")
+def track_record() -> dict[str, Any]:
+    """Overall and per-ticker hit rate / alpha from the decision log."""
+    return get_track_record()

@@ -33,7 +33,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
     resolve_instrument_identity,
 )
-from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.memory import LOG_LOCK, TradingMemoryLog
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.ohlcv_cache import start_run_cache
 from tradingagents.dataflows.utils import safe_ticker_component
@@ -71,6 +71,10 @@ def _coerce_max_retries(value):
 
 class TradingAgentsGraph:
     """Main class that orchestrates the trading agents framework."""
+
+    # Trading sessions used to score a decision against realized alpha. Shared by
+    # the outcome fetch and the maturity pre-check so the two cannot disagree.
+    HOLDING_DAYS = 5
 
     def __init__(
         self,
@@ -269,21 +273,36 @@ class TradingAgentsGraph:
         return benchmark_map.get("", "SPY")
 
     def _fetch_returns(
-        self, ticker: str, trade_date: str, holding_days: int = 5,
+        self, ticker: str, trade_date: str, holding_days: int = HOLDING_DAYS,
         benchmark: str = "SPY",
     ) -> tuple[float | None, float | None, int | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
         ``benchmark`` is the index used as the alpha baseline (resolved by the
         caller via ``_resolve_benchmark``). Returns ``(raw_return, alpha_return,
-        actual_holding_days)`` or ``(None, None, None)`` if price data is
-        unavailable (too recent, delisted, or network error).
+        holding_days)`` or ``(None, None, None)`` if the full holding window is
+        not yet available (too recent, delisted, or network error).
+
+        The window is all-or-nothing on purpose: grading a call on however many
+        bars happen to exist turns a 1-day wobble into a stored verdict, and
+        that verdict is re-injected into every later analysis of the ticker.
         """
         from tradingagents.dataflows.symbol_utils import normalize_symbol
 
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
+            # Query through today rather than a fixed calendar cutoff. A fixed
+            # cutoff can hold fewer than holding_days sessions across a long
+            # closure — a 2025-01-27 Shanghai call spans Lunar New Year and gets
+            # only 5 bars in 15 calendar days — and since the window never grows,
+            # the strict guard below would leave it pending forever. Asking for
+            # everything available and then indexing the Nth bar is correct at
+            # any closure length. Reading past trade_date is fine here: this
+            # scores an already-made decision and feeds no analyst.
+            end = max(
+                start + timedelta(days=holding_days + 10),
+                datetime.now() + timedelta(days=1),
+            )
             end_str = end.strftime("%Y-%m-%d")
 
             # Normalize so the realized-return lookup hits the same instrument
@@ -292,20 +311,19 @@ class TradingAgentsGraph:
             stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
             bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
 
-            if len(stock) < 2 or len(bench) < 2:
-                return None, None, None
+            if min(len(stock), len(bench)) - 1 < holding_days:
+                return None, None, None  # window not complete yet — retried next run
 
-            actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
             raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
+                (stock["Close"].iloc[holding_days] - stock["Close"].iloc[0])
                 / stock["Close"].iloc[0]
             )
             bench_ret = float(
-                (bench["Close"].iloc[actual_days] - bench["Close"].iloc[0])
+                (bench["Close"].iloc[holding_days] - bench["Close"].iloc[0])
                 / bench["Close"].iloc[0]
             )
             alpha = raw - bench_ret
-            return raw, alpha, actual_days
+            return raw, alpha, holding_days
         except Exception as e:
             logger.warning(
                 "Could not resolve outcome for %s on %s vs %s (will retry next run): %s",
@@ -313,45 +331,103 @@ class TradingAgentsGraph:
             )
             return None, None, None
 
-    def _resolve_pending_entries(self, ticker: str) -> None:
-        """Resolve pending log entries for ticker at the start of a new run.
+    def _window_could_have_closed(self, trade_date: str) -> bool:
+        """Could ``HOLDING_DAYS`` trading sessions have elapsed since trade_date?
 
-        Fetches returns for each same-ticker pending entry, generates reflections,
-        then writes all updates in a single atomic batch write to avoid redundant I/O.
-        Skips entries whose price data is not yet available (too recent or delisted).
+        Calendar-day arithmetic only — no network. Trading sessions can never
+        outnumber calendar days, so a False here means the outcome definitely is
+        not available yet, while True only means it might be (the authoritative
+        check is the bar count in ``_fetch_returns``). Conservative in the safe
+        direction: it never skips an entry that could be resolved.
 
-        Trade-off: only same-ticker entries are resolved per run.  Entries for
-        other tickers accumulate until that ticker is run again.
+        An unparseable date fails open so a malformed tag is still attempted
+        rather than silently skipped forever.
         """
-        pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
-        if not pending:
-            return
+        try:
+            traded = datetime.strptime(trade_date, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return True
+        return (datetime.now().date() - traded).days >= self.HOLDING_DAYS
 
-        benchmark = self._resolve_benchmark(ticker)
-        updates = []
-        for entry in pending:
-            raw, alpha, days = self._fetch_returns(
-                ticker, entry["date"], benchmark=benchmark,
-            )
-            if raw is None:
-                continue  # price not available yet — try again next run
-            reflection = self.reflector.reflect_on_final_decision(
-                final_decision=entry.get("decision", ""),
-                raw_return=raw,
-                alpha_return=alpha,
-                benchmark_name=benchmark,
-            )
-            updates.append({
-                "ticker": ticker,
-                "trade_date": entry["date"],
-                "raw_return": raw,
-                "alpha_return": alpha,
-                "holding_days": days,
-                "reflection": reflection,
-            })
+    def _resolve_pending_entries(self, should_stop=None) -> None:
+        """Resolve every pending log entry at the start of a new run.
 
-        if updates:
-            self.memory_log.batch_update_with_outcomes(updates)
+        Fetches returns for each pending entry, generates reflections, then
+        writes all updates in a single atomic batch write to avoid redundant
+        I/O.  Skips entries whose holding window has not completed yet.
+
+        Resolves across all tickers, not just the one being analyzed: a ticker
+        analyzed once would otherwise stay pending forever, and its call would
+        never be scored.
+
+        Holds the log lock across the whole read/reflect/write cycle. Up to
+        three runs start concurrently, and all of them see the same pending
+        set — without the lock they would each pay for the same reflections and
+        then race to write. Whoever gets in first does the work; the others
+        re-read inside the lock, find nothing pending, and return.
+
+        ``should_stop`` is an optional predicate checked between entries. This
+        phase runs before the graph — where cancellation is handled — and a large
+        backlog means a price fetch plus an LLM call per entry, so without it a
+        cancelled run keeps spending. Whatever was already resolved is still
+        written; the rest stays pending for the next run.
+        """
+        with LOG_LOCK:
+            pending = self.memory_log.get_pending_entries()
+            if not pending:
+                return
+
+            updates = []
+            for entry in pending:
+                if should_stop is not None and should_stop():
+                    logger.info(
+                        "Cancelled while resolving outcomes; %d resolved, %d left pending",
+                        len(updates), len(pending) - len(updates),
+                    )
+                    break
+                # Skip entries too young to have matured, before paying for any
+                # network call. Without this a same-day batch is quadratic: each
+                # finished run appends a pending entry, so run N re-probes all
+                # N-1 earlier ones — ~600 requests at the 25-ticker cap, all
+                # certain to return None, all serialized under LOG_LOCK, and
+                # repeated on every run until the window finally passes.
+                if not self._window_could_have_closed(entry["date"]):
+                    continue
+                entry_ticker = entry["ticker"]
+                benchmark = self._resolve_benchmark(entry_ticker)
+                raw, alpha, days = self._fetch_returns(
+                    entry_ticker, entry["date"], benchmark=benchmark,
+                )
+                if raw is None:
+                    continue  # window not complete yet — try again next run
+                try:
+                    reflection = self.reflector.reflect_on_final_decision(
+                        final_decision=entry.get("decision", ""),
+                        raw_return=raw,
+                        alpha_return=alpha,
+                        benchmark_name=benchmark,
+                        holding_days=days,
+                    )
+                except Exception as e:
+                    # Scoring an old decision must never abort the analysis the
+                    # user is waiting on. Leave the entry pending and move on;
+                    # otherwise one un-reflectable entry blocks every later run.
+                    logger.warning(
+                        "Reflection failed for %s on %s (left pending): %s",
+                        entry_ticker, entry["date"], e,
+                    )
+                    continue
+                updates.append({
+                    "ticker": entry_ticker,
+                    "trade_date": entry["date"],
+                    "raw_return": raw,
+                    "alpha_return": alpha,
+                    "holding_days": days,
+                    "reflection": reflection,
+                })
+
+            if updates:
+                self.memory_log.batch_update_with_outcomes(updates)
 
     def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
         """Resolve ticker identity once and return the full instrument context.
@@ -361,9 +437,25 @@ class TradingAgentsGraph:
         hallucinating one from the price chart (#814). Both the propagate()
         path and the CLI call this so the resolved identity reaches the whole
         graph regardless of entry point.
+
+        An optional ``position_context`` note from config is appended here for
+        the same reason: this is the one place every entry point funnels
+        through, so the holder's actual exposure reaches every agent without
+        threading a new argument through the graph.
         """
         identity = resolve_instrument_identity(ticker)
-        return build_instrument_context(ticker, asset_type, identity)
+        context = build_instrument_context(ticker, asset_type, identity)
+
+        position = str(self.config.get("position_context") or "").strip()
+        if position:
+            context += (
+                f" The holder's current position: {position}. "
+                "Use this only to size the recommendation and frame the action "
+                "(add, trim, hold, exit) — it is not evidence about the "
+                "instrument. Do not let an existing position, its cost basis, "
+                "or an unrealized gain or loss bias the rating."
+            )
+        return context
 
     def _run_signature(self, asset_type: str) -> str:
         """Graph-shape inputs that must invalidate a checkpoint if changed.
@@ -392,7 +484,7 @@ class TradingAgentsGraph:
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+        self._resolve_pending_entries()
 
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):

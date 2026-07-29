@@ -163,6 +163,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",
+    # Optional free-text note on the holder's existing position, e.g.
+    # "200 sh @ $412, ~6% of book, held since March". Appended to the
+    # instrument context so agents can size the action instead of always
+    # answering "should anyone own this". Empty = position-agnostic analysis.
+    "position_context": "",
     # Per-stage model routing. Keys: analysts, researchers, research_manager,
     # trader, risk_analysts, portfolio_manager, investor_briefing; values
     # "quick" / "deep". Empty = current defaults (managers on deep, rest on

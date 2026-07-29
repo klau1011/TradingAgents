@@ -60,6 +60,7 @@ __all__ = [
     "detect_instrument_kind",
     "resolve_instrument_identity",
     "get_instrument_context_from_state",
+    "get_analyst_reports_from_state",
     "get_language_instruction",
     "create_msg_delete",
 ]
@@ -258,6 +259,28 @@ def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
         state.get("asset_type", "stock"),
         identity={},
     )
+
+
+_ANALYST_REPORT_LABELS = (
+    ("market_report", "Market Research Report"),
+    ("sentiment_report", "Social Media Sentiment Report"),
+    ("news_report", "Latest World Affairs Report"),
+    ("fundamentals_report", "Company Fundamentals Report"),
+)
+
+
+def get_analyst_reports_from_state(state: Mapping[str, Any]) -> str:
+    """Return the analyst reports as a labelled block for a prompt.
+
+    Reads defensively and skips empty reports so a deselected analyst yields a
+    shorter block rather than a KeyError or an empty labelled section.
+    """
+    parts = []
+    for key, label in _ANALYST_REPORT_LABELS:
+        report = state.get(key)
+        if isinstance(report, str) and report.strip():
+            parts.append(f"{label}:\n{report.strip()}")
+    return "\n\n".join(parts)
 
 
 def create_msg_delete():

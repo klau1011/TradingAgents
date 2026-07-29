@@ -17,6 +17,9 @@ const HistoryPage = lazy(() =>
 const ReportPage = lazy(() =>
   import("./routes/Report").then((m) => ({ default: m.ReportPage }))
 );
+const TrackRecordPage = lazy(() =>
+  import("./routes/TrackRecord").then((m) => ({ default: m.TrackRecordPage }))
+);
 
 export function App() {
   const location = useLocation();
@@ -30,6 +33,7 @@ export function App() {
               <Route path="/" element={<NewRunPage />} />
               <Route path="/runs/:runId" element={<RunPage />} />
               <Route path="/history" element={<HistoryPage />} />
+              <Route path="/track-record" element={<TrackRecordPage />} />
               <Route path="/reports/:folder" element={<ReportPage />} />
             </Routes>
           </Suspense>
@@ -67,6 +71,9 @@ function Header() {
           </NavLink>
           <NavLink to="/history" className={link}>
             History
+          </NavLink>
+          <NavLink to="/track-record" className={link}>
+            Track record
           </NavLink>
           <ThemeToggle />
         </nav>

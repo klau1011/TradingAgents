@@ -183,6 +183,12 @@ def get_macro_data(
             "series_id": series_id,
             "observation_start": start_date,
             "observation_end": curr_date,
+            # Pin the vintage to curr_date. Without this FRED returns today's
+            # revised values, and observation_end filters by the period a figure
+            # describes rather than when it was published — so a backtest on
+            # 2024-01-15 would see January CPI, released mid-February.
+            "realtime_start": curr_date,
+            "realtime_end": curr_date,
             "sort_order": "asc",
         },
     ).get("observations", [])

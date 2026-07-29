@@ -1,9 +1,34 @@
 """Append-only markdown decision log for TradingAgents."""
 
+import functools
+import os
 import re
+import threading
 from pathlib import Path
 
 from tradingagents.agents.utils.rating import parse_rating
+
+# Serializes every read-modify-write of the log. The web dashboard runs up to
+# three analyses concurrently as threads in one process (``run_in_executor``),
+# and each one resolves pending entries at start-up and appends its decision at
+# the end. Without this, two workers interleave read -> compute -> replace and
+# silently drop one another's updates.
+#
+# Reentrant because outcome resolution holds the lock across the whole
+# read/reflect/write cycle and the writers it calls re-acquire it.
+#
+# ponytail: in-process lock, which is what the dashboard needs; a cross-process
+# file lock is the upgrade path if the CLI and the web app ever write at once.
+LOG_LOCK = threading.RLock()
+
+
+def locked(func):
+    """Serialize a log read-modify-write against other run workers."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with LOG_LOCK:
+            return func(*args, **kwargs)
+    return wrapper
 
 
 def _parse_pct(value: str | None) -> float | None:
@@ -37,6 +62,7 @@ class TradingMemoryLog:
 
     # --- Write path (Phase A) ---
 
+    @locked
     def store_decision(
         self,
         ticker: str,
@@ -46,7 +72,9 @@ class TradingMemoryLog:
         """Append pending entry at end of propagate(). No LLM call."""
         if not self._log_path:
             return
-        # Idempotency guard: fast raw-text scan instead of full parse
+        # Idempotency guard: fast raw-text scan instead of full parse. Under the
+        # lock so a concurrent resolver's rewrite can't land between the check
+        # and the append.
         if self._log_path.exists():
             raw = self._log_path.read_text(encoding="utf-8")
             for line in raw.splitlines():
@@ -114,6 +142,7 @@ class TradingMemoryLog:
 
     # --- Update path (Phase B) ---
 
+    @locked
     def update_with_outcome(
         self,
         ticker: str,
@@ -174,11 +203,9 @@ class TradingMemoryLog:
             return
 
         new_blocks = self._apply_rotation(new_blocks)
-        new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
-        tmp_path.write_text(new_text, encoding="utf-8")
-        tmp_path.replace(self._log_path)
+        self._atomic_write(self._SEPARATOR.join(new_blocks))
 
+    @locked
     def batch_update_with_outcomes(self, updates: list[dict]) -> None:
         """Apply multiple outcome updates in a single read + atomic write.
 
@@ -228,12 +255,28 @@ class TradingMemoryLog:
                 new_blocks.append(block)
 
         new_blocks = self._apply_rotation(new_blocks)
-        new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
-        tmp_path.write_text(new_text, encoding="utf-8")
-        tmp_path.replace(self._log_path)
+        self._atomic_write(self._SEPARATOR.join(new_blocks))
 
     # --- Helpers ---
+
+    def _atomic_write(self, text: str) -> None:
+        """Replace the log with ``text`` via a uniquely-named temp file.
+
+        The temp name carries pid + thread id: a shared ``.tmp`` path lets one
+        writer's ``replace`` move another writer's half-written content into
+        place, and leaves the second ``replace`` raising FileNotFoundError.
+        """
+        tmp_path = self._log_path.with_suffix(
+            f".{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            tmp_path.write_text(text, encoding="utf-8")
+            tmp_path.replace(self._log_path)
+        finally:
+            # replace() consumes the temp file; this only fires if we failed
+            # before it, and must never mask the original error.
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
 
     def _apply_rotation(self, blocks: list[str]) -> list[str]:
         """Drop oldest resolved blocks when their count exceeds max_entries.

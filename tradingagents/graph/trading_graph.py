@@ -1,67 +1,87 @@
 # TradingAgents/graph/trading_graph.py
 
+import json
 import logging
 import os
-from pathlib import Path
-import json
 from datetime import datetime, timedelta
-from typing import Dict, Any, Tuple, List, Optional
+from pathlib import Path
+from typing import Any
 
 import yfinance as yf
-
-logger = logging.getLogger(__name__)
-
 from langgraph.prebuilt import ToolNode
 
-from tradingagents.llm_clients import create_llm_client
-
-from tradingagents.agents import *
-from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.agents.utils.agent_states import (
-    AgentState,
-    InvestDebateState,
-    RiskDebateState,
-)
-from tradingagents.dataflows.config import set_config
-from tradingagents.dataflows.ohlcv_cache import start_run_cache
-
-# Import the new abstract tool methods from agent_utils
+# Import the abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
-    get_stock_data,
-    get_live_quote,
-    get_indicators,
-    get_fundamentals,
+    build_instrument_context,
+    get_analyst_recommendations,
     get_balance_sheet,
     get_cashflow,
-    get_income_statement,
-    get_analyst_recommendations,
-    get_news,
-    get_insider_transactions,
-    get_global_news,
-    get_etf_profile,
-    get_etf_holdings,
-    get_etf_sector_weights,
     get_etf_correlation,
+    get_etf_holdings,
+    get_etf_profile,
+    get_etf_sector_weights,
+    get_fundamentals,
+    get_global_news,
+    get_income_statement,
+    get_indicators,
+    get_insider_transactions,
+    get_live_quote,
+    get_macro_indicators,
+    get_news,
+    get_prediction_markets,
+    get_stock_data,
+    get_verified_market_snapshot,
+    resolve_instrument_identity,
 )
+from tradingagents.agents.utils.memory import LOG_LOCK, TradingMemoryLog
+from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.ohlcv_cache import start_run_cache
+from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.llm_clients import create_llm_client
+from tradingagents.reporting import write_report_tree
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
-from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
+from .setup import GraphSetup
 from .signal_processing import SignalProcessor
+
+logger = logging.getLogger(__name__)
+
+
+def _coerce_max_retries(value):
+    """Validate an ``llm_max_retries`` value to a non-negative int.
+
+    Accepts an int or a numeric string (env vars arrive as strings). Rejects
+    booleans and negatives loudly so a misconfiguration fails at startup rather
+    than silently disabling retries.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"llm_max_retries must be an integer, not a boolean: {value!r}")
+    try:
+        n = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"llm_max_retries must be an integer, got {value!r}") from exc
+    if n < 0:
+        raise ValueError(f"llm_max_retries must be >= 0, got {n}")
+    return n
 
 
 class TradingAgentsGraph:
     """Main class that orchestrates the trading agents framework."""
 
+    # Trading sessions used to score a decision against realized alpha. Shared by
+    # the outcome fetch and the maturity pre-check so the two cannot disagree.
+    HOLDING_DAYS = 5
+
     def __init__(
         self,
-        selected_analysts=["market", "social", "news", "fundamentals"],
+        selected_analysts=("market", "social", "news", "fundamentals"),
         debug=False,
-        config: Dict[str, Any] = None,
-        callbacks: Optional[List] = None,
+        config: dict[str, Any] = None,
+        callbacks: list | None = None,
     ):
         """Initialize the trading agents graph and components.
 
@@ -104,7 +124,7 @@ class TradingAgentsGraph:
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
-        
+
         self.memory_log = TradingMemoryLog(self.config)
 
         # Create tool nodes
@@ -124,7 +144,9 @@ class TradingAgentsGraph:
             llm_map=self.config.get("agent_llm_map"),
         )
 
-        self.propagator = Propagator()
+        self.propagator = Propagator(
+            max_recur_limit=self.config.get("max_recur_limit", 100),
+        )
         self.reflector = Reflector(self.quick_thinking_llm)
         self.signal_processor = SignalProcessor(self.quick_thinking_llm)
 
@@ -133,12 +155,15 @@ class TradingAgentsGraph:
         self.ticker = None
         self.log_states_dict = {}  # date to full state dict
 
+        # Graph-shape-affecting run choices, kept for the checkpoint signature.
+        self.selected_analysts = tuple(selected_analysts)
+
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
 
-    def _get_provider_kwargs(self) -> Dict[str, Any]:
+    def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {}
         provider = self.config.get("llm_provider", "").lower()
@@ -158,9 +183,22 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
+        # Sampling temperature is cross-provider: forward it whenever set.
+        # float() here so a value coming from a TRADINGAGENTS_TEMPERATURE env
+        # string ("0.2") works the same as a programmatic float.
+        temperature = self.config.get("temperature")
+        if temperature is not None and temperature != "":
+            kwargs["temperature"] = float(temperature)
+
+        # SDK retry budget is cross-provider. Forward it only when explicitly set
+        # so each provider keeps its own default (usually 2) otherwise (#1091).
+        max_retries = self.config.get("llm_max_retries")
+        if max_retries is not None and max_retries != "":
+            kwargs["max_retries"] = _coerce_max_retries(max_retries)
+
         return kwargs
 
-    def _create_tool_nodes(self) -> Dict[str, ToolNode]:
+    def _create_tool_nodes(self) -> dict[str, ToolNode]:
         """Create tool nodes for different data sources using abstract methods."""
         return {
             "market": ToolNode(
@@ -171,7 +209,11 @@ class TradingAgentsGraph:
                     get_live_quote,
                     # Technical indicators
                     get_indicators,
-                    # Benchmark correlation (useful for ETFs)
+                    # Deterministic verification snapshot (bound to the analyst
+                    # LLM and required by its prompt; must be executable here or
+                    # the call fails and the model reports it "unavailable").
+                    get_verified_market_snapshot,
+                    # Benchmark correlation (useful for ETFs).
                     get_etf_correlation,
                 ]
             ),
@@ -187,6 +229,8 @@ class TradingAgentsGraph:
                     get_news,
                     get_global_news,
                     get_insider_transactions,
+                    get_macro_indicators,
+                    get_prediction_markets,
                 ]
             ),
             "fundamentals": ToolNode(
@@ -207,91 +251,240 @@ class TradingAgentsGraph:
             ),
         }
 
+    def _resolve_benchmark(self, ticker: str) -> str:
+        """Pick the benchmark ticker for alpha calculation against ``ticker``.
+
+        ``config["benchmark_ticker"]`` overrides everything when set; otherwise
+        the suffix map matches the ticker's exchange suffix (e.g. ``.T`` for
+        Tokyo). US-listed tickers without a dotted suffix fall through to the
+        empty-suffix entry (SPY by default). Unrecognised suffixes (including
+        US tickers with dots like ``BRK.B``) also fall back to the empty-suffix
+        entry, which is the right default because the alpha calculation works
+        in USD.
+        """
+        explicit = self.config.get("benchmark_ticker")
+        if explicit:
+            return explicit
+        benchmark_map = self.config.get("benchmark_map", {})
+        ticker_upper = ticker.upper()
+        for suffix, benchmark in benchmark_map.items():
+            if suffix and ticker_upper.endswith(suffix.upper()):
+                return benchmark
+        return benchmark_map.get("", "SPY")
+
     def _fetch_returns(
-        self, ticker: str, trade_date: str, holding_days: int = 5
-    ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
+        self, ticker: str, trade_date: str, holding_days: int = HOLDING_DAYS,
+        benchmark: str = "SPY",
+    ) -> tuple[float | None, float | None, int | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
-        Returns (raw_return, alpha_return, actual_holding_days) or
-        (None, None, None) if price data is unavailable (too recent, delisted,
-        or network error).
+        ``benchmark`` is the index used as the alpha baseline (resolved by the
+        caller via ``_resolve_benchmark``). Returns ``(raw_return, alpha_return,
+        holding_days)`` or ``(None, None, None)`` if the full holding window is
+        not yet available (too recent, delisted, or network error).
+
+        The window is all-or-nothing on purpose: grading a call on however many
+        bars happen to exist turns a 1-day wobble into a stored verdict, and
+        that verdict is re-injected into every later analysis of the ticker.
         """
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
+
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
+            # Query through today rather than a fixed calendar cutoff. A fixed
+            # cutoff can hold fewer than holding_days sessions across a long
+            # closure — a 2025-01-27 Shanghai call spans Lunar New Year and gets
+            # only 5 bars in 15 calendar days — and since the window never grows,
+            # the strict guard below would leave it pending forever. Asking for
+            # everything available and then indexing the Nth bar is correct at
+            # any closure length. Reading past trade_date is fine here: this
+            # scores an already-made decision and feeds no analyst.
+            end = max(
+                start + timedelta(days=holding_days + 10),
+                datetime.now() + timedelta(days=1),
+            )
             end_str = end.strftime("%Y-%m-%d")
 
-            stock = yf.Ticker(ticker).history(start=trade_date, end=end_str)
-            spy = yf.Ticker("SPY").history(start=trade_date, end=end_str)
+            # Normalize so the realized-return lookup hits the same instrument
+            # the analysis priced (e.g. XAUUSD -> GC=F) (#984). The benchmark is
+            # already a canonical Yahoo symbol from ``_resolve_benchmark``.
+            stock = yf.Ticker(normalize_symbol(ticker)).history(start=trade_date, end=end_str)
+            bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
 
-            if len(stock) < 2 or len(spy) < 2:
-                return None, None, None
+            if min(len(stock), len(bench)) - 1 < holding_days:
+                return None, None, None  # window not complete yet — retried next run
 
-            actual_days = min(holding_days, len(stock) - 1, len(spy) - 1)
             raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
+                (stock["Close"].iloc[holding_days] - stock["Close"].iloc[0])
                 / stock["Close"].iloc[0]
             )
-            spy_ret = float(
-                (spy["Close"].iloc[actual_days] - spy["Close"].iloc[0])
-                / spy["Close"].iloc[0]
+            bench_ret = float(
+                (bench["Close"].iloc[holding_days] - bench["Close"].iloc[0])
+                / bench["Close"].iloc[0]
             )
-            alpha = raw - spy_ret
-            return raw, alpha, actual_days
+            alpha = raw - bench_ret
+            return raw, alpha, holding_days
         except Exception as e:
             logger.warning(
-                "Could not resolve outcome for %s on %s (will retry next run): %s",
-                ticker, trade_date, e,
+                "Could not resolve outcome for %s on %s vs %s (will retry next run): %s",
+                ticker, trade_date, benchmark, e,
             )
             return None, None, None
 
-    def _resolve_pending_entries(self, ticker: str) -> None:
-        """Resolve pending log entries for ticker at the start of a new run.
+    def _window_could_have_closed(self, trade_date: str) -> bool:
+        """Could ``HOLDING_DAYS`` trading sessions have elapsed since trade_date?
 
-        Fetches returns for each same-ticker pending entry, generates reflections,
-        then writes all updates in a single atomic batch write to avoid redundant I/O.
-        Skips entries whose price data is not yet available (too recent or delisted).
+        Calendar-day arithmetic only — no network. Trading sessions can never
+        outnumber calendar days, so a False here means the outcome definitely is
+        not available yet, while True only means it might be (the authoritative
+        check is the bar count in ``_fetch_returns``). Conservative in the safe
+        direction: it never skips an entry that could be resolved.
 
-        Trade-off: only same-ticker entries are resolved per run.  Entries for
-        other tickers accumulate until that ticker is run again.
+        An unparseable date fails open so a malformed tag is still attempted
+        rather than silently skipped forever.
         """
-        pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
-        if not pending:
-            return
+        try:
+            traded = datetime.strptime(trade_date, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return True
+        return (datetime.now().date() - traded).days >= self.HOLDING_DAYS
 
-        updates = []
-        for entry in pending:
-            raw, alpha, days = self._fetch_returns(ticker, entry["date"])
-            if raw is None:
-                continue  # price not available yet — try again next run
-            reflection = self.reflector.reflect_on_final_decision(
-                final_decision=entry.get("decision", ""),
-                raw_return=raw,
-                alpha_return=alpha,
+    def _resolve_pending_entries(self, should_stop=None) -> None:
+        """Resolve every pending log entry at the start of a new run.
+
+        Fetches returns for each pending entry, generates reflections, then
+        writes all updates in a single atomic batch write to avoid redundant
+        I/O.  Skips entries whose holding window has not completed yet.
+
+        Resolves across all tickers, not just the one being analyzed: a ticker
+        analyzed once would otherwise stay pending forever, and its call would
+        never be scored.
+
+        Holds the log lock across the whole read/reflect/write cycle. Up to
+        three runs start concurrently, and all of them see the same pending
+        set — without the lock they would each pay for the same reflections and
+        then race to write. Whoever gets in first does the work; the others
+        re-read inside the lock, find nothing pending, and return.
+
+        ``should_stop`` is an optional predicate checked between entries. This
+        phase runs before the graph — where cancellation is handled — and a large
+        backlog means a price fetch plus an LLM call per entry, so without it a
+        cancelled run keeps spending. Whatever was already resolved is still
+        written; the rest stays pending for the next run.
+        """
+        with LOG_LOCK:
+            pending = self.memory_log.get_pending_entries()
+            if not pending:
+                return
+
+            updates = []
+            for entry in pending:
+                if should_stop is not None and should_stop():
+                    logger.info(
+                        "Cancelled while resolving outcomes; %d resolved, %d left pending",
+                        len(updates), len(pending) - len(updates),
+                    )
+                    break
+                # Skip entries too young to have matured, before paying for any
+                # network call. Without this a same-day batch is quadratic: each
+                # finished run appends a pending entry, so run N re-probes all
+                # N-1 earlier ones — ~600 requests at the 25-ticker cap, all
+                # certain to return None, all serialized under LOG_LOCK, and
+                # repeated on every run until the window finally passes.
+                if not self._window_could_have_closed(entry["date"]):
+                    continue
+                entry_ticker = entry["ticker"]
+                benchmark = self._resolve_benchmark(entry_ticker)
+                raw, alpha, days = self._fetch_returns(
+                    entry_ticker, entry["date"], benchmark=benchmark,
+                )
+                if raw is None:
+                    continue  # window not complete yet — try again next run
+                try:
+                    reflection = self.reflector.reflect_on_final_decision(
+                        final_decision=entry.get("decision", ""),
+                        raw_return=raw,
+                        alpha_return=alpha,
+                        benchmark_name=benchmark,
+                        holding_days=days,
+                    )
+                except Exception as e:
+                    # Scoring an old decision must never abort the analysis the
+                    # user is waiting on. Leave the entry pending and move on;
+                    # otherwise one un-reflectable entry blocks every later run.
+                    logger.warning(
+                        "Reflection failed for %s on %s (left pending): %s",
+                        entry_ticker, entry["date"], e,
+                    )
+                    continue
+                updates.append({
+                    "ticker": entry_ticker,
+                    "trade_date": entry["date"],
+                    "raw_return": raw,
+                    "alpha_return": alpha,
+                    "holding_days": days,
+                    "reflection": reflection,
+                })
+
+            if updates:
+                self.memory_log.batch_update_with_outcomes(updates)
+
+    def resolve_instrument_context(self, ticker: str, asset_type: str = "stock") -> str:
+        """Resolve ticker identity once and return the full instrument context.
+
+        Deterministic yfinance lookup (cached, fail-open) injected into a
+        context string so every agent anchors to the real company instead of
+        hallucinating one from the price chart (#814). Both the propagate()
+        path and the CLI call this so the resolved identity reaches the whole
+        graph regardless of entry point.
+
+        An optional ``position_context`` note from config is appended here for
+        the same reason: this is the one place every entry point funnels
+        through, so the holder's actual exposure reaches every agent without
+        threading a new argument through the graph.
+        """
+        identity = resolve_instrument_identity(ticker)
+        context = build_instrument_context(ticker, asset_type, identity)
+
+        position = str(self.config.get("position_context") or "").strip()
+        if position:
+            context += (
+                f" The holder's current position: {position}. "
+                "Use this only to size the recommendation and frame the action "
+                "(add, trim, hold, exit) — it is not evidence about the "
+                "instrument. Do not let an existing position, its cost basis, "
+                "or an unrealized gain or loss bias the rating."
             )
-            updates.append({
-                "ticker": ticker,
-                "trade_date": entry["date"],
-                "raw_return": raw,
-                "alpha_return": alpha,
-                "holding_days": days,
-                "reflection": reflection,
-            })
+        return context
 
-        if updates:
-            self.memory_log.batch_update_with_outcomes(updates)
+    def _run_signature(self, asset_type: str) -> str:
+        """Graph-shape inputs that must invalidate a checkpoint if changed.
 
-    def propagate(self, company_name, trade_date):
+        Keyed into the checkpoint thread ID so a resume under a different analyst
+        selection, debate/risk depth, or asset mode starts fresh instead of
+        silently continuing the previous graph (#1089).
+        """
+        return "|".join([
+            "analysts=" + ",".join(self.selected_analysts),
+            f"debate={self.config['max_debate_rounds']}",
+            f"risk={self.config['max_risk_discuss_rounds']}",
+            f"asset={asset_type}",
+        ])
+
+    def propagate(self, company_name, trade_date, asset_type: str = "stock"):
         """Run the trading agents graph for a company on a specific date.
 
-        When ``checkpoint_enabled`` is set in config, the graph is recompiled
-        with a per-ticker SqliteSaver so a crashed run can resume from the last
+        ``asset_type`` selects between the stock pipeline (default) and the
+        crypto pipeline (``"crypto"``) shipped in #567 — the CLI auto-detects
+        from the ticker; programmatic callers pass it explicitly. When
+        ``checkpoint_enabled`` is set in config, the graph is recompiled with
+        a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
         """
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+        self._resolve_pending_entries()
 
         # Recompile with a checkpointer if the user opted in.
         if self.config.get("checkpoint_enabled"):
@@ -302,7 +495,8 @@ class TradingAgentsGraph:
             self.graph = self.workflow.compile(checkpointer=saver)
 
             step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                self._run_signature(asset_type),
             )
             if step is not None:
                 logger.info(
@@ -312,38 +506,71 @@ class TradingAgentsGraph:
                 logger.info("Starting fresh for %s on %s", company_name, trade_date)
 
         try:
-            return self._run_graph(company_name, trade_date)
+            return self._run_graph(company_name, trade_date, asset_type=asset_type)
         finally:
             if self._checkpointer_ctx is not None:
                 self._checkpointer_ctx.__exit__(None, None, None)
                 self._checkpointer_ctx = None
                 self.graph = self.workflow.compile()
 
-    def _run_graph(self, company_name, trade_date):
+    def save_reports(self, final_state, ticker, save_path=None) -> Path:
+        """Write the markdown report tree for a completed run, like the CLI does.
+
+        Programmatic callers get the same on-disk reports the CLI produces. Pass
+        an explicit ``save_path`` or let it default under ``results_dir``.
+        """
+        if save_path is None:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            save_path = (
+                Path(self.config["results_dir"])
+                / "reports"
+                / f"{safe_ticker_component(ticker)}_{stamp}"
+            )
+        return write_report_tree(final_state, ticker, save_path)
+
+    def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Per-run OHLCV cache: dedupes yfinance fetches across analysts.
         with start_run_cache():
-            # Initialize state — inject memory log context for PM.
+            # Initialize state with memory and deterministic instrument identity.
             past_context = self.memory_log.get_past_context(company_name)
+            instrument_context = self.resolve_instrument_context(
+                company_name, asset_type
+            )
             init_agent_state = self.propagator.create_initial_state(
-                company_name, trade_date, past_context=past_context
+                company_name,
+                trade_date,
+                asset_type=asset_type,
+                past_context=past_context,
+                instrument_context=instrument_context,
             )
             args = self.propagator.get_graph_args()
 
-            # Inject thread_id so same ticker+date resumes, different date starts fresh.
+            # Inject thread_id so same ticker+date+graph-shape resumes; a different
+            # date or graph shape starts fresh (#1089).
             if self.config.get("checkpoint_enabled"):
-                tid = thread_id(company_name, str(trade_date))
+                tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
                 args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
             if self.debug:
                 trace = []
+                last_printed = None
                 for chunk in self.graph.stream(init_agent_state, **args):
-                    if len(chunk["messages"]) == 0:
-                        pass
-                    else:
-                        chunk["messages"][-1].pretty_print()
+                    if chunk["messages"]:
+                        msg = chunk["messages"][-1]
+                        # Nodes after the trader don't append to messages, so the
+                        # same trailing message repeats across chunks. Print it only
+                        # when it changes (#1027); the trace/state merge is unchanged.
+                        signature = (type(msg).__name__, getattr(msg, "content", None))
+                        if signature != last_printed:
+                            msg.pretty_print()
+                            last_printed = signature
                         trace.append(chunk)
-                final_state = trace[-1]
+                # Streamed chunks are per-node deltas. Merge them so the returned
+                # state matches what graph.invoke() yields in the non-debug path.
+                final_state = {}
+                for chunk in trace:
+                    final_state.update(chunk)
             else:
                 final_state = self.graph.invoke(init_agent_state, **args)
 
@@ -363,7 +590,8 @@ class TradingAgentsGraph:
             # Clear checkpoint on successful completion to avoid stale state.
             if self.config.get("checkpoint_enabled"):
                 clear_checkpoint(
-                    self.config["data_cache_dir"], company_name, str(trade_date)
+                    self.config["data_cache_dir"], company_name, str(trade_date),
+                    self._run_signature(asset_type),
                 )
 
             return final_state, self.process_signal(final_state["final_trade_decision"])
@@ -400,8 +628,10 @@ class TradingAgentsGraph:
             "final_trade_decision": final_state["final_trade_decision"],
         }
 
-        # Save to file
-        directory = Path(self.config["results_dir"]) / self.ticker / "TradingAgentsStrategy_logs"
+        # Save to file. Reject ticker values that would escape the
+        # results directory when joined as a path component.
+        safe_ticker = safe_ticker_component(self.ticker)
+        directory = Path(self.config["results_dir"]) / safe_ticker / "TradingAgentsStrategy_logs"
         directory.mkdir(parents=True, exist_ok=True)
 
         log_path = directory / f"full_states_log_{trade_date}.json"

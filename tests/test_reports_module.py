@@ -169,6 +169,29 @@ def test_get_decision_returns_full_dict(fake_reports_root: Path) -> None:
     )
 
     got = reports_mod.get_decision("FUL_20260109_120000")
+    # Reports written before confidence/what_would_change_it existed must still
+    # load, with the newer optional fields defaulting to None.
+    assert got == {**payload, "confidence": None, "what_would_change_it": None}
+
+
+def test_get_decision_passes_through_new_optional_fields(fake_reports_root: Path) -> None:
+    folder = fake_reports_root / "NEW_20260109_130000"
+    _write_complete(folder)
+    import json as _json
+    payload = {
+        "rating": "Buy",
+        "executive_summary": "summary",
+        "investment_thesis": "thesis",
+        "price_target": None,
+        "time_horizon": None,
+        "confidence": "high",
+        "what_would_change_it": "A close below $180 would move it to Hold.",
+    }
+    (folder / "5_portfolio" / "decision.json").write_text(
+        _json.dumps(payload), encoding="utf-8"
+    )
+
+    got = reports_mod.get_decision("NEW_20260109_130000")
     assert got == payload
 
 
@@ -194,7 +217,11 @@ def test_get_report_includes_decision_detail(fake_reports_root: Path) -> None:
     )
     report = reports_mod.get_report("DET_20260111_120000")
     assert report is not None
-    assert report["decision_detail"] == payload
+    assert report["decision_detail"] == {
+        **payload,
+        "confidence": None,
+        "what_would_change_it": None,
+    }
     assert report["decision"] == "OVERWEIGHT"
 
 

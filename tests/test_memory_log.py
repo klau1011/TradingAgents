@@ -432,17 +432,57 @@ class TestDeferredReflection:
         assert msft["ticker"] == "MSFT" and msft["pending"] is True
 
     def test_update_atomic_write(self, tmp_path):
-        """A pre-existing .tmp file is overwritten; the log is correctly updated."""
+        """The write leaves no temp file behind and a stale one can't break it.
+
+        Temp names are unique per pid+thread, so an unrelated leftover is simply
+        ignored rather than being moved into place over the real log.
+        """
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
         stale_tmp = tmp_path / "trading_memory.tmp"
-        stale_tmp.write_text("GARBAGE CONTENT — should be overwritten", encoding="utf-8")
+        stale_tmp.write_text("GARBAGE CONTENT", encoding="utf-8")
         log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Correct.")
-        assert not stale_tmp.exists()
         entries = log.load_entries()
         assert len(entries) == 1
         assert entries[0]["reflection"] == "Correct."
         assert entries[0]["pending"] is False
+        # No temp file of ours survives the write.
+        assert [p.name for p in tmp_path.glob("*.tmp")] == ["trading_memory.tmp"]
+
+    def test_concurrent_writers_do_not_lose_updates(self, tmp_path):
+        """Three workers resolving at once must not drop each other's writes.
+
+        The dashboard runs up to three analyses as threads in one process, and
+        each resolves pending entries at start-up. With a shared temp path and no
+        lock, one worker's replace() moves another's file into place and the
+        loser raises FileNotFoundError.
+        """
+        import threading
+
+        log = make_log(tmp_path)
+        tickers = [f"TICK{i}" for i in range(12)]
+        for t in tickers:
+            log.store_decision(t, "2026-01-10", DECISION_BUY)
+
+        errors = []
+
+        def resolve(ticker):
+            try:
+                log.update_with_outcome(ticker, "2026-01-10", 0.01, 0.01, 5, f"r-{ticker}")
+            except Exception as e:  # pragma: no cover - only on a regression
+                errors.append(e)
+
+        threads = [threading.Thread(target=resolve, args=(t,)) for t in tickers]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        assert errors == []
+        entries = log.load_entries()
+        assert len(entries) == len(tickers)
+        assert log.get_pending_entries() == [], "an update was lost to a race"
+        assert {e["reflection"] for e in entries} == {f"r-{t}" for t in tickers}
 
     def test_update_noop_when_no_log_path(self):
         log = TradingMemoryLog(config=None)
@@ -529,7 +569,11 @@ class TestDeferredReflection:
         assert raw is None and alpha is None and days is None
 
     def test_fetch_returns_spy_shorter_than_stock(self):
-        """SPY having fewer rows than the stock must not raise IndexError."""
+        """A short benchmark series defers the grade instead of truncating it.
+
+        Must not raise IndexError, and must not grade a 5-day call on 2 days of
+        benchmark data.
+        """
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         spy_prices   = [400.0, 402.0, 403.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
@@ -540,8 +584,57 @@ class TestDeferredReflection:
                 return m
             mock_ticker_cls.side_effect = _make_ticker
             raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
-        assert raw is not None and alpha is not None and days is not None
-        assert days == 2
+        assert (raw, alpha, days) == (None, None, None)
+
+    def test_fetch_returns_defers_partial_window(self):
+        """Re-running a ticker the next day must not grade the prior call on 1 day.
+
+        Regression for the `[... | +3.8% | +5.0% | 1d]` entries: partial windows
+        were graded and their reflections fed back into later analyses.
+        """
+        prices = [100.0, 102.0]  # trade date + 1 bar
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            m = MagicMock()
+            m.history.return_value = _price_df(prices)
+            mock_ticker_cls.return_value = m
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NOW", "2026-06-22")
+        assert (raw, alpha, days) == (None, None, None)
+
+    def test_fetch_returns_queries_through_today(self):
+        """The request window must not be a fixed calendar span.
+
+        A long closure (Lunar New Year for a Shanghai listing) can leave fewer
+        than holding_days sessions inside a fixed cutoff, and because that window
+        never grows the strict guard would defer the entry forever.
+        """
+        captured = {}
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            def _make_ticker(sym):
+                m = MagicMock()
+
+                def _history(start, end):
+                    captured["end"] = end
+                    return _price_df([100.0] * 6)
+                m.history.side_effect = _history
+                return m
+            mock_ticker_cls.side_effect = _make_ticker
+            TradingAgentsGraph._fetch_returns(mock_graph, "600519.SS", "2025-01-27")
+        # Far beyond 2025-01-27 + 15 days, which held only 5 sessions.
+        assert captured["end"] > "2025-02-11"
+
+    def test_fetch_returns_grades_full_window_only(self):
+        """Exactly holding_days+1 bars resolves, and always at the full horizon."""
+        prices = [100.0, 101.0, 102.0, 103.0, 104.0, 110.0]
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            m = MagicMock()
+            m.history.return_value = _price_df(prices)
+            mock_ticker_cls.return_value = m
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NOW", "2026-06-22")
+        assert days == 5
+        assert raw == pytest.approx(0.10)  # measured to the last bar, not an earlier one
 
     # TradingAgentsGraph._resolve_benchmark — picks index for alpha calc
 
@@ -642,16 +735,166 @@ class TestDeferredReflection:
 
     # TradingAgentsGraph._resolve_pending_entries
 
-    def test_resolve_skips_other_tickers(self, tmp_path):
-        """Pending AAPL entry is not resolved when the run is for NVDA."""
+    def test_resolve_covers_every_pending_ticker(self, tmp_path):
+        """A ticker analyzed once still gets scored on a later run of another ticker.
+
+        Scoping resolution to the ticker being analyzed strands single-run
+        tickers as pending forever.
+        """
         log = make_log(tmp_path)
         log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
+        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "Held up."
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
         mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
-        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
-        mock_graph._fetch_returns.assert_not_called()
-        assert len(log.get_pending_entries()) == 1
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+        assert log.get_pending_entries() == []
+        assert {e["ticker"] for e in log.load_entries()} == {"AAPL", "NVDA"}
+
+    def test_reflection_failure_leaves_entry_pending_without_aborting(self, tmp_path):
+        """A bad old entry must not block the analysis the user is waiting on.
+
+        Resolution runs at the start of every run, so an unhandled provider error
+        on one stale entry would abort each subsequent run before its pipeline
+        started — and retry the same entry forever.
+        """
+        log = make_log(tmp_path)
+        # The reflector only receives the decision text, so identify the entries
+        # through it rather than by ticker.
+        log.store_decision("AAPL", "2026-01-10", "Rating: Buy\nAAPL thesis.")
+        log.store_decision("NVDA", "2026-01-10", "Rating: Buy\nNVDA thesis.")
+
+        def _reflect(**kw):
+            if "AAPL" in kw["final_decision"]:
+                raise RuntimeError("provider 503")
+            return "NVDA held up."
+
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.side_effect = _reflect
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+
+        # Must not raise.
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+
+        pending = {e["ticker"] for e in log.get_pending_entries()}
+        assert pending == {"AAPL"}, "failed entry should stay pending"
+        resolved = [e for e in log.load_entries() if not e["pending"]]
+        assert [e["ticker"] for e in resolved] == ["NVDA"]
+        assert resolved[0]["reflection"] == "NVDA held up."
+
+    def test_resolve_skips_immature_entries_without_fetching(self, tmp_path):
+        """Same-day entries must cost zero network calls.
+
+        Each finished run in a batch appends a pending entry, so without a
+        maturity pre-check run N re-probes all N-1 earlier ones — quadratic in
+        batch size, every probe certain to return None, all under LOG_LOCK.
+        """
+        from datetime import datetime, timedelta
+
+        log = make_log(tmp_path)
+        today = datetime.now().date()
+        # A same-day batch: 8 entries that cannot possibly have matured.
+        for i in range(8):
+            log.store_decision(f"T{i}", today.strftime("%Y-%m-%d"), DECISION_BUY)
+        # Plus one old enough to be worth checking.
+        old = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+        log.store_decision("OLD", old, DECISION_BUY)
+
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "done"
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.HOLDING_DAYS = TradingAgentsGraph.HOLDING_DAYS
+        mock_graph._window_could_have_closed = (
+            lambda d: TradingAgentsGraph._window_could_have_closed(mock_graph, d)
+        )
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+
+        # Only the mature entry was fetched — not the 8 same-day ones.
+        assert mock_graph._fetch_returns.call_count == 1
+        assert mock_graph._fetch_returns.call_args[0][0] == "OLD"
+        assert {e["ticker"] for e in log.get_pending_entries()} == {
+            f"T{i}" for i in range(8)
+        }
+
+    def test_window_could_have_closed_is_conservative(self):
+        """False only when maturity is impossible; unparseable dates fail open."""
+        from datetime import datetime, timedelta
+
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.HOLDING_DAYS = 5
+        check = TradingAgentsGraph._window_could_have_closed
+        today = datetime.now().date()
+
+        def at(days_ago):
+            return check(mock_graph, (today - timedelta(days=days_ago)).strftime("%Y-%m-%d"))
+
+        assert at(0) is False
+        assert at(4) is False
+        # 5 calendar days is the earliest 5 sessions could have passed; the bar
+        # count in _fetch_returns is what actually decides.
+        assert at(5) is True
+        assert at(30) is True
+        assert check(mock_graph, "not-a-date") is True
+
+    def test_resolve_honours_cancellation_and_keeps_finished_work(self, tmp_path):
+        """Cancelling must stop the backlog, not run it to completion.
+
+        This phase precedes the graph (where cancellation is handled) and costs a
+        price fetch plus an LLM call per entry, so a cancelled run would otherwise
+        keep spending. Work already paid for is still written.
+        """
+        log = make_log(tmp_path)
+        for i in range(6):
+            log.store_decision(f"T{i}", "2026-01-10", DECISION_BUY)
+
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "done"
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+
+        calls = {"n": 0}
+
+        def _stop():
+            calls["n"] += 1
+            return calls["n"] > 2  # allow two entries through, then cancel
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph, should_stop=_stop)
+
+        assert mock_reflector.reflect_on_final_decision.call_count == 2
+        assert len(log.get_pending_entries()) == 4  # remainder retried next run
+        resolved = [e for e in log.load_entries() if not e["pending"]]
+        assert len(resolved) == 2, "already-paid-for work must still be written"
+
+    def test_resolve_without_should_stop_processes_everything(self, tmp_path):
+        """The predicate is optional — omitting it resolves the whole backlog."""
+        log = make_log(tmp_path)
+        for i in range(3):
+            log.store_decision(f"T{i}", "2026-01-10", DECISION_BUY)
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "done"
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+        assert log.get_pending_entries() == []
 
     def test_resolve_marks_entry_completed(self, tmp_path):
         """After resolve, get_pending_entries() is empty and the entry has a REFLECTION."""
@@ -662,8 +905,9 @@ class TestDeferredReflection:
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
         mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
         mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
-        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
         assert log.get_pending_entries() == []
         entries = log.load_entries()
         assert len(entries) == 1

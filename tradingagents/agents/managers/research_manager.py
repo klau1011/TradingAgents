@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
-from tradingagents.agents.structured import (
-    NO_EXTERNAL_TOOLS,
+from tradingagents.agents.utils.agent_utils import (
+    get_analyst_reports_from_state,
+    get_instrument_context_from_state,
+    get_language_instruction,
+)
+from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
@@ -17,6 +20,14 @@ def create_research_manager(llm):
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
         history = state["investment_debate_state"].get("history", "")
+        analyst_reports = get_analyst_reports_from_state(state)
+
+        past_context = state.get("past_context", "")
+        lessons_block = (
+            f"\n\n**Lessons from prior decisions and outcomes:**\n{past_context}"
+            if past_context
+            else ""
+        )
 
         investment_debate_state = state["investment_debate_state"]
 
@@ -27,28 +38,25 @@ def create_research_manager(llm):
 ---
 
 **Rating Scale** (use exactly one):
-- **Buy**: Strong conviction in the bull thesis; recommend taking or growing the position
-- **Overweight**: Constructive view; recommend gradually increasing exposure
-- **Hold**: Balanced view; recommend maintaining the current position
-- **Underweight**: Cautious view; recommend trimming exposure
-- **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position
+- **Buy**: The bull thesis survives the bear's single strongest objection, and there is a named catalyst with a timeline
+- **Overweight**: Constructive lean that does not clear the Buy bar; recommend gradually increasing exposure
+- **Hold**: The evidence is genuinely balanced, or the fact that would decide it is missing
+- **Underweight**: Cautious lean that does not clear the Sell bar; recommend trimming exposure
+- **Sell**: The bear thesis survives the bull's single strongest objection, and there is a named catalyst with a timeline
 
-The debate always contains conflicting arguments; deciding which side is stronger is the job, so conflict alone is not a reason to Hold. Commit to the side with the stronger case, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after that weighing, or too thin to support a call; do not manufacture a direction to appear decisive. Weigh the bull and bear cases on their merits, independent of which side spoke first or last.
+Buy and Sell are conviction calls and must clear that bar — do not reach for them to sound decisive. Overweight and Underweight are the ordinary directional ratings. Hold is a real answer when the deciding evidence is absent; do not use it to avoid taking a side the evidence supports.
+
+---
+
+The debate below is advocacy: each researcher was assigned a side and argues it. Weigh it for the quality of the reasoning, not for who sounded more confident. Verify factual claims against the analyst reports, which are the primary evidence — where a researcher's claim conflicts with a report, the report wins. If a material fact in the reports went unmentioned by both sides, raise it yourself and account for it.
+
+**Analyst Reports (primary evidence):**
+{analyst_reports}
 
 ---
 
 **Debate History:**
-{history}
-
-## Output
-
-Write these sections, in this order, starting with the recommendation on its own line:
-
-- **Recommendation**: exactly one of Buy / Overweight / Hold / Underweight / Sell
-- **Rationale**: which arguments decided it
-- **Strategic Actions**: concrete steps for the trader, sized against a standard allocation
-
-{NO_EXTERNAL_TOOLS}""" + get_language_instruction()
+{history}{lessons_block}""" + get_language_instruction()
 
         investment_plan = invoke_structured_or_freetext(
             structured_llm,
@@ -59,6 +67,7 @@ Write these sections, in this order, starting with the recommendation on its own
         )
 
         new_investment_debate_state = {
+            "judge_decision": investment_plan,
             "history": investment_debate_state.get("history", ""),
             "bear_history": investment_debate_state.get("bear_history", ""),
             "bull_history": investment_debate_state.get("bull_history", ""),

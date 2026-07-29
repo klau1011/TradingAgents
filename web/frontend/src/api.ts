@@ -4,6 +4,7 @@ import type {
   ReportSummary,
   RunDetail,
   RunSummary,
+  TrackRecord,
 } from "./types";
 
 const json = async <T,>(res: Response): Promise<T> => {
@@ -35,6 +36,7 @@ export const api = {
       .then((r) => r.reports),
   getReport: (folder: string) =>
     fetch(`/api/reports/${encodeURIComponent(folder)}`).then(json<ReportDetail>),
+  getTrackRecord: () => fetch("/api/track-record").then(json<TrackRecord>),
 };
 
 export function streamUrl(runId: string): string {

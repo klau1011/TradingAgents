@@ -10,10 +10,26 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolated_results_dir(tmp_path, monkeypatch):
-    """Keep run-summary persistence (results_dir/web_runs) out of real state."""
-    from tradingagents.default_config import DEFAULT_CONFIG
+    """Keep run-summary persistence (results_dir/web_runs) out of real state.
 
-    monkeypatch.setitem(DEFAULT_CONFIG, "results_dir", str(tmp_path))
+    Patches the dict each consumer actually holds, not just the current module
+    attribute. Other test modules reload modules via ``importlib.reload``, which
+    can leave ``web.backend.runs`` bound to an earlier ``DEFAULT_CONFIG`` object;
+    patching only the attribute then silently misses, and these tests fall
+    through to the developer's real ~/.tradingagents/logs.
+    """
+    import tradingagents.default_config as default_config
+    from web.backend import reports as reports_mod, runs as runs_mod
+
+    seen = set()
+    for cfg in (
+        default_config.DEFAULT_CONFIG,
+        runs_mod.DEFAULT_CONFIG,
+        reports_mod.DEFAULT_CONFIG,
+    ):
+        if id(cfg) not in seen:
+            seen.add(id(cfg))
+            monkeypatch.setitem(cfg, "results_dir", str(tmp_path))
 
 
 @pytest.fixture()

@@ -300,6 +300,35 @@ class TestResearchManagerAgent:
         result = rm(_make_rm_state())
         assert result["investment_plan"] == plain_response
 
+    def test_prompt_includes_analyst_reports_not_just_the_debate(self):
+        """The judge must see primary evidence, not only the advocates' summary of it.
+
+        A fact neither researcher cited was previously lost before any decision
+        was made.
+        """
+        captured = {}
+        llm = _structured_rm_llm(captured)
+        rm = create_research_manager(llm)
+        state = _make_rm_state()
+        state |= {
+            "market_report": "RSI 78, extended above the 50-day.",
+            "fundamentals_report": "Gross margin compressed 240bps QoQ.",
+        }
+        rm(state)
+        prompt = captured["prompt"]
+        assert "RSI 78" in prompt
+        assert "Gross margin compressed 240bps QoQ" in prompt
+
+    def test_prompt_omits_deselected_analysts(self):
+        """A deselected analyst yields a shorter block, not an empty labelled section."""
+        captured = {}
+        llm = _structured_rm_llm(captured)
+        rm = create_research_manager(llm)
+        state = _make_rm_state()
+        state |= {"market_report": "RSI 78.", "sentiment_report": ""}
+        rm(state)
+        assert "Social Media Sentiment Report" not in captured["prompt"]
+
 
 # ---------------------------------------------------------------------------
 # Sentiment Analyst: schema, render, structured happy path + fallback

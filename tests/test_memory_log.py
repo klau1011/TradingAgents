@@ -790,6 +790,65 @@ class TestDeferredReflection:
         assert [e["ticker"] for e in resolved] == ["NVDA"]
         assert resolved[0]["reflection"] == "NVDA held up."
 
+    def test_resolve_skips_immature_entries_without_fetching(self, tmp_path):
+        """Same-day entries must cost zero network calls.
+
+        Each finished run in a batch appends a pending entry, so without a
+        maturity pre-check run N re-probes all N-1 earlier ones — quadratic in
+        batch size, every probe certain to return None, all under LOG_LOCK.
+        """
+        from datetime import datetime, timedelta
+
+        log = make_log(tmp_path)
+        today = datetime.now().date()
+        # A same-day batch: 8 entries that cannot possibly have matured.
+        for i in range(8):
+            log.store_decision(f"T{i}", today.strftime("%Y-%m-%d"), DECISION_BUY)
+        # Plus one old enough to be worth checking.
+        old = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+        log.store_decision("OLD", old, DECISION_BUY)
+
+        mock_reflector = MagicMock()
+        mock_reflector.reflect_on_final_decision.return_value = "done"
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.HOLDING_DAYS = TradingAgentsGraph.HOLDING_DAYS
+        mock_graph._window_could_have_closed = (
+            lambda d: TradingAgentsGraph._window_could_have_closed(mock_graph, d)
+        )
+        mock_graph.memory_log = log
+        mock_graph.reflector = mock_reflector
+        mock_graph._resolve_benchmark = MagicMock(return_value="SPY")
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph)
+
+        # Only the mature entry was fetched — not the 8 same-day ones.
+        assert mock_graph._fetch_returns.call_count == 1
+        assert mock_graph._fetch_returns.call_args[0][0] == "OLD"
+        assert {e["ticker"] for e in log.get_pending_entries()} == {
+            f"T{i}" for i in range(8)
+        }
+
+    def test_window_could_have_closed_is_conservative(self):
+        """False only when maturity is impossible; unparseable dates fail open."""
+        from datetime import datetime, timedelta
+
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.HOLDING_DAYS = 5
+        check = TradingAgentsGraph._window_could_have_closed
+        today = datetime.now().date()
+
+        def at(days_ago):
+            return check(mock_graph, (today - timedelta(days=days_ago)).strftime("%Y-%m-%d"))
+
+        assert at(0) is False
+        assert at(4) is False
+        # 5 calendar days is the earliest 5 sessions could have passed; the bar
+        # count in _fetch_returns is what actually decides.
+        assert at(5) is True
+        assert at(30) is True
+        assert check(mock_graph, "not-a-date") is True
+
     def test_resolve_honours_cancellation_and_keeps_finished_work(self, tmp_path):
         """Cancelling must stop the backlog, not run it to completion.
 

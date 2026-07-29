@@ -72,6 +72,10 @@ def _coerce_max_retries(value):
 class TradingAgentsGraph:
     """Main class that orchestrates the trading agents framework."""
 
+    # Trading sessions used to score a decision against realized alpha. Shared by
+    # the outcome fetch and the maturity pre-check so the two cannot disagree.
+    HOLDING_DAYS = 5
+
     def __init__(
         self,
         selected_analysts=("market", "social", "news", "fundamentals"),
@@ -269,7 +273,7 @@ class TradingAgentsGraph:
         return benchmark_map.get("", "SPY")
 
     def _fetch_returns(
-        self, ticker: str, trade_date: str, holding_days: int = 5,
+        self, ticker: str, trade_date: str, holding_days: int = HOLDING_DAYS,
         benchmark: str = "SPY",
     ) -> tuple[float | None, float | None, int | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
@@ -327,6 +331,24 @@ class TradingAgentsGraph:
             )
             return None, None, None
 
+    def _window_could_have_closed(self, trade_date: str) -> bool:
+        """Could ``HOLDING_DAYS`` trading sessions have elapsed since trade_date?
+
+        Calendar-day arithmetic only — no network. Trading sessions can never
+        outnumber calendar days, so a False here means the outcome definitely is
+        not available yet, while True only means it might be (the authoritative
+        check is the bar count in ``_fetch_returns``). Conservative in the safe
+        direction: it never skips an entry that could be resolved.
+
+        An unparseable date fails open so a malformed tag is still attempted
+        rather than silently skipped forever.
+        """
+        try:
+            traded = datetime.strptime(trade_date, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return True
+        return (datetime.now().date() - traded).days >= self.HOLDING_DAYS
+
     def _resolve_pending_entries(self, should_stop=None) -> None:
         """Resolve every pending log entry at the start of a new run.
 
@@ -363,6 +385,14 @@ class TradingAgentsGraph:
                         len(updates), len(pending) - len(updates),
                     )
                     break
+                # Skip entries too young to have matured, before paying for any
+                # network call. Without this a same-day batch is quadratic: each
+                # finished run appends a pending entry, so run N re-probes all
+                # N-1 earlier ones — ~600 requests at the 25-ticker cap, all
+                # certain to return None, all serialized under LOG_LOCK, and
+                # repeated on every run until the window finally passes.
+                if not self._window_could_have_closed(entry["date"]):
+                    continue
                 entry_ticker = entry["ticker"]
                 benchmark = self._resolve_benchmark(entry_ticker)
                 raw, alpha, days = self._fetch_returns(

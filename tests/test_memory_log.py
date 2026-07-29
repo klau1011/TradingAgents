@@ -601,6 +601,29 @@ class TestDeferredReflection:
             raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NOW", "2026-06-22")
         assert (raw, alpha, days) == (None, None, None)
 
+    def test_fetch_returns_queries_through_today(self):
+        """The request window must not be a fixed calendar span.
+
+        A long closure (Lunar New Year for a Shanghai listing) can leave fewer
+        than holding_days sessions inside a fixed cutoff, and because that window
+        never grows the strict guard would defer the entry forever.
+        """
+        captured = {}
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("yfinance.Ticker") as mock_ticker_cls:
+            def _make_ticker(sym):
+                m = MagicMock()
+
+                def _history(start, end):
+                    captured["end"] = end
+                    return _price_df([100.0] * 6)
+                m.history.side_effect = _history
+                return m
+            mock_ticker_cls.side_effect = _make_ticker
+            TradingAgentsGraph._fetch_returns(mock_graph, "600519.SS", "2025-01-27")
+        # Far beyond 2025-01-27 + 15 days, which held only 5 sessions.
+        assert captured["end"] > "2025-02-11"
+
     def test_fetch_returns_grades_full_window_only(self):
         """Exactly holding_days+1 bars resolves, and always at the full horizon."""
         prices = [100.0, 101.0, 102.0, 103.0, 104.0, 110.0]

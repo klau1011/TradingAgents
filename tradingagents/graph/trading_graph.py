@@ -287,9 +287,18 @@ class TradingAgentsGraph:
 
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
-            # Buffer must cover weekends AND holiday clusters: too tight and a
-            # trade date near Christmas never accumulates holding_days bars.
-            end = start + timedelta(days=holding_days + 10)
+            # Query through today rather than a fixed calendar cutoff. A fixed
+            # cutoff can hold fewer than holding_days sessions across a long
+            # closure — a 2025-01-27 Shanghai call spans Lunar New Year and gets
+            # only 5 bars in 15 calendar days — and since the window never grows,
+            # the strict guard below would leave it pending forever. Asking for
+            # everything available and then indexing the Nth bar is correct at
+            # any closure length. Reading past trade_date is fine here: this
+            # scores an already-made decision and feeds no analyst.
+            end = max(
+                start + timedelta(days=holding_days + 10),
+                datetime.now() + timedelta(days=1),
+            )
             end_str = end.strftime("%Y-%m-%d")
 
             # Normalize so the realized-return lookup hits the same instrument

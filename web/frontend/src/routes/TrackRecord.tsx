@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Target } from "lucide-react";
+import { AlertTriangle, Target } from "lucide-react";
 import { api } from "../api";
 import { Card } from "../components/ui/Card";
 import { DecisionBadge } from "../components/ui/StatusBadge";
@@ -75,8 +75,11 @@ function TickerCard({ t }: { t: TrackRecordTicker }) {
             </tr>
           </thead>
           <tbody>
-            {t.entries.map((e) => (
-              <tr key={`${e.date}-${e.rating}`} className="border-t border-edge">
+            {t.entries.map((e, i) => (
+              // Date+rating is not unique: re-analysing an already-resolved date
+              // appends a second entry that can share both. The occurrence index
+              // keeps reconciliation stable when one flips pending -> scored.
+              <tr key={`${e.date}-${e.rating}-${i}`} className="border-t border-edge">
                 <td className="py-3 pr-6 whitespace-nowrap">{e.date}</td>
                 <td className="py-3 pr-6">
                   <DecisionBadge decision={e.rating} preview />
@@ -102,7 +105,7 @@ function TickerCard({ t }: { t: TrackRecordTicker }) {
 }
 
 export function TrackRecordPage() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ["track-record"],
     queryFn: api.getTrackRecord,
   });
@@ -121,6 +124,18 @@ export function TrackRecordPage() {
       </header>
 
       {isLoading && <SkeletonTable />}
+
+      {!isLoading && (error || !data) && (
+        <EmptyState
+          icon={AlertTriangle}
+          title="Could not load the track record"
+          description={
+            error
+              ? String(error)
+              : "The decision log could not be read right now."
+          }
+        />
+      )}
 
       {data && data.overall.total === 0 && (
         <EmptyState

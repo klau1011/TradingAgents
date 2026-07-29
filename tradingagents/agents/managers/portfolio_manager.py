@@ -65,7 +65,7 @@ Buy and Sell are conviction calls and must clear that bar; Overweight and Underw
 
 Be decisive and ground every conclusion in specific evidence from the analysts. State your confidence (low/medium/high) in the rating based on the strength of the evidence and how much the risk analysts agreed.
 
-The risk analysts were each assigned a stance, so weigh the substance of their arguments rather than their conviction. Finally, name what would change this rating: the specific observable development that would move it one tier more bullish, and the one that would move it one tier more bearish. Make them concrete enough to check on a later re-analysis.{get_language_instruction()}"""
+The risk analysts were each assigned a stance, so weigh the substance of their arguments rather than their conviction. Finally, name what would change this rating, using the two adjacent tiers that actually exist on the scale: for a middle rating give the development that would move it one tier more bullish and the one that would move it one tier more bearish; for Buy (nothing above it) give what would knock it down to Overweight and what would confirm holding it at Buy; for Sell (nothing below it) give what would lift it to Underweight and what would confirm holding it at Sell. Never name a tier outside Buy / Overweight / Hold / Underweight / Sell. Make each trigger concrete enough to check on a later re-analysis.{get_language_instruction()}"""
 
         final_trade_decision, decision_obj = invoke_structured_or_freetext_with_object(
             structured_llm,

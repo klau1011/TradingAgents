@@ -239,9 +239,14 @@ class PortfolioDecision(BaseModel):
     what_would_change_it: str = Field(
         default="",
         description=(
-            "Two sentences: the specific, observable development that would move "
-            "this rating one tier more bullish, and the one that would move it one "
-            "tier more bearish. Name concrete triggers a reader could check on a "
+            "Two sentences naming the triggers that would move this rating, using "
+            "only tiers that exist on the scale. For a middle rating: what would "
+            "move it one tier more bullish, and one tier more bearish. For Buy "
+            "(the top tier): what would knock it down to Overweight, and what "
+            "would confirm holding it at Buy. For Sell (the bottom tier): what "
+            "would lift it to Underweight, and what would confirm holding it at "
+            "Sell. Never invent a tier outside Buy / Overweight / Hold / "
+            "Underweight / Sell. Give concrete triggers a reader could check on a "
             "later re-analysis (a price level, a metric threshold, a dated event) "
             "rather than generic risks."
         ),

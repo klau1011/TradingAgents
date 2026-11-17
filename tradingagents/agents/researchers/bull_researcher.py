@@ -31,8 +31,7 @@ def create_bull_researcher(llm):
         past_context = state.get("past_context", "")
         lessons_block = (
             f"Past lessons from prior decisions and outcomes:\n{past_context}\n"
-            if past_context
-            else ""
+            if past_context else ""
         )
 
         prompt = f"""You are a Bull Analyst advocating for investing in the {target_label}. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.

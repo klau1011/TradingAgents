@@ -14,7 +14,7 @@ from tradingagents.graph.setup import LLM_MAP_STAGES, GraphSetup
 
 def _make_setup(llm_map=None):
     quick, deep = MagicMock(name="quick"), MagicMock(name="deep")
-    setup = GraphSetup(quick, deep, {}, ConditionalLogic(), llm_map=llm_map)
+    setup = GraphSetup(quick, deep, ConditionalLogic(), 10, llm_map=llm_map)
     return setup, quick, deep
 
 
@@ -107,3 +107,17 @@ class TestAdaptiveRiskDebate:
             trader_plan="**Action**: Hold",
         )
         assert logic.should_continue_risk_analysis(state) == "Portfolio Manager"
+
+
+@pytest.mark.unit
+def test_missing_rating_does_not_manufacture_adaptive_disagreement():
+    logic = ConditionalLogic(max_risk_discuss_rounds=1, adaptive_extra_rounds=2)
+    assert logic.should_continue_risk_analysis(_risk_state(3, trader_plan="No action")) == "Portfolio Manager"
+
+
+@pytest.mark.unit
+def test_every_stage_can_override_its_default():
+    setup, quick, deep = _make_setup(dict.fromkeys(LLM_MAP_STAGES, "deep"))
+    assert len(LLM_MAP_STAGES) == 7
+    for stage in LLM_MAP_STAGES:
+        assert setup._llm(stage, quick) is deep

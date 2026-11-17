@@ -26,7 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tradingagents.agents.rating import run_rating
 from tradingagents.dataflows.ohlcv_cache import start_run_cache
+from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import (
     ANALYST_DISPLAY_NAMES,
     ANALYST_ORDER,
@@ -36,6 +38,7 @@ from tradingagents.default_config import (
     REPORT_SECTIONS,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.reporting import write_report_tree
 from tradingagents.runner_events import (
     AgentStatusEvent,
     DoneEvent,
@@ -74,7 +77,7 @@ class RunnerConfig:
     analysts: list[str]  # subset of ANALYST_ORDER
     research_depth: int = 1
     llm_provider: str = "openai"
-    backend_url: str = "https://api.openai.com/v1"
+    backend_url: str | None = None
     shallow_thinker: str = "gpt-5.6-luna"
     deep_thinker: str = "gpt-5.6-sol"
     output_language: str = "English"
@@ -168,7 +171,7 @@ class AnalysisRunner:
         # multiple concurrent runs target the same ticker in the same second.
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         suffix = uuid.uuid4().hex[:6]
-        self.save_path: Path = results_root / f"{config.ticker}_{timestamp}_{suffix}"
+        self.save_path: Path = results_root / f"{safe_ticker_component(config.ticker)}_{timestamp}_{suffix}"
 
         # Internal state mirroring cli MessageBuffer
         self._selected_analysts = [a.lower() for a in config.analysts]
@@ -219,12 +222,11 @@ class AnalysisRunner:
                 config=self._graph_config,
                 debug=False,
                 callbacks=self.callbacks,
+                should_stop=self.cancel_event.is_set,
             )
 
-            # Mark first analyst in_progress immediately for snappy UI
-            if self._selected_analysts:
-                first = ANALYST_DISPLAY_NAMES[self._selected_analysts[0]]
-                self._set_agent_status(first, "in_progress")
+            for analyst in self._selected_analysts:
+                self._set_agent_status(ANALYST_DISPLAY_NAMES[analyst], "in_progress")
 
             asset_type = _detect_asset_type(self.config.ticker)
             if asset_type != "stock":
@@ -235,32 +237,18 @@ class AnalysisRunner:
                     )
                 )
 
-            if hasattr(graph, "_resolve_pending_entries"):
-                # Cancellable: a large backlog is a price fetch plus an LLM call
-                # per entry, and this runs before _stream does its own checks.
-                graph._resolve_pending_entries(should_stop=self.cancel_event.is_set)
-
-            past_context = ""
-            memory_log = getattr(graph, "memory_log", None)
-            if memory_log is not None:
-                past_context = memory_log.get_past_context(self.config.ticker)
-
-            instrument_context = ""
-            if hasattr(graph, "resolve_instrument_context"):
-                instrument_context = graph.resolve_instrument_context(
-                    self.config.ticker, asset_type
+            if self.cancel_event.is_set():
+                raise RunCancelled("Run cancelled by user")
+            with graph.checkpoint_scope(self.config.ticker, self.config.analysis_date, asset_type) as thread_id:
+                init_state = graph.create_run_state(
+                    self.config.ticker, self.config.analysis_date, asset_type
                 )
-
-            init_state = graph.propagator.create_initial_state(
-                self.config.ticker,
-                self.config.analysis_date,
-                asset_type=asset_type,
-                past_context=past_context,
-                instrument_context=instrument_context,
-            )
-            args = graph.propagator.get_graph_args(callbacks=self.callbacks)
-
-            final_state = self._stream(graph, init_state, args)
+                args = graph.propagator.get_graph_args(callbacks=self.callbacks)
+                if thread_id is not None:
+                    args["config"].setdefault("configurable", {})["thread_id"] = thread_id
+                final_state = self._stream(graph, graph.checkpoint_input(init_state), args)
+                graph.record_decision(self.config.ticker, self.config.analysis_date, final_state)
+                graph.clear_checkpoint_on_success(self.config.ticker, self.config.analysis_date, asset_type)
 
             # Mark every agent completed
             for agent in list(self._agent_status.keys()):
@@ -271,18 +259,8 @@ class AnalysisRunner:
                 if section in final_state and final_state[section]:
                     self._set_report_section(section, final_state[section])
 
-            decision = graph.process_signal(final_state["final_trade_decision"])
-
-            if memory_log is not None:
-                memory_log.store_decision(
-                    ticker=self.config.ticker,
-                    trade_date=self.config.analysis_date,
-                    final_trade_decision=final_state["final_trade_decision"],
-                )
-
-            report_path = save_report_to_disk(
-                final_state, self.config.ticker, self.save_path
-            )
+            decision = run_rating(final_state)
+            report_path = graph.save_reports(final_state, self.config.ticker, self.save_path)
 
             self._emit(
                 DoneEvent(
@@ -317,22 +295,21 @@ class AnalysisRunner:
     # ------------------------------------------------------------------
 
     def _stream(self, graph, init_state, args) -> dict[str, Any]:
-        # Per-run OHLCV cache: dedupes yfinance fetches across analysts within
-        # this run. Required here because the web/CLI paths bypass
-        # ``TradingAgentsGraph._run_graph`` (which has its own cache scope).
-        with start_run_cache():
-            trace = []
-            for chunk in graph.graph.stream(init_state, **args):
-                if self.cancel_event.is_set():
-                    raise RunCancelled("Run cancelled by user")
-                self._process_chunk(chunk)
-                trace.append(chunk)
-            if not trace:
-                raise RuntimeError("Graph produced no output chunks")
-
         final_state: dict[str, Any] = {}
-        for chunk in trace:
-            final_state.update(chunk)
+        with start_run_cache():
+            stream = graph.stream_run(init_state, **args)
+            try:
+                for messages, state in stream:
+                    if self.cancel_event.is_set():
+                        raise RunCancelled("Run cancelled by user")
+                    chunk = {**(state or {}), "messages": messages}
+                    self._process_chunk(chunk)
+                    if state is not None:
+                        final_state.update(state)
+            finally:
+                stream.close()
+        if not final_state:
+            raise RuntimeError("Graph produced no output chunks")
         return final_state
 
     def _process_chunk(self, chunk: dict[str, Any]) -> None:
@@ -367,14 +344,14 @@ class AnalysisRunner:
         if debate:
             bull = (debate.get("bull_history") or "").strip()
             bear = (debate.get("bear_history") or "").strip()
-            judge = (debate.get("judge_decision") or "").strip()
-            if bull or bear:
+            judge = (chunk.get("investment_plan") or debate.get("judge_decision") or "").strip()
+            if not judge and (bull or bear):
                 self._set_research_team_status("in_progress")
-            if bull:
+            if bull and not judge:
                 self._set_report_section(
                     "investment_plan", f"### Bull Researcher Analysis\n{bull}"
                 )
-            if bear:
+            if bear and not judge:
                 self._set_report_section(
                     "investment_plan", f"### Bear Researcher Analysis\n{bear}"
                 )
@@ -383,7 +360,8 @@ class AnalysisRunner:
                     "investment_plan", f"### Research Manager Decision\n{judge}"
                 )
                 self._set_research_team_status("completed")
-                self._set_agent_status("Trader", "in_progress")
+                if self._agent_status.get("Trader") == "pending":
+                    self._set_agent_status("Trader", "in_progress")
 
         # Trader
         if chunk.get("trader_investment_plan"):
@@ -400,30 +378,29 @@ class AnalysisRunner:
             agg = (risk.get("aggressive_history") or "").strip()
             con = (risk.get("conservative_history") or "").strip()
             neu = (risk.get("neutral_history") or "").strip()
-            judge = (risk.get("judge_decision") or "").strip()
-            if agg:
+            judge = (chunk.get("final_trade_decision") or risk.get("judge_decision") or "").strip()
+            if agg and not judge:
                 if self._agent_status.get("Aggressive Analyst") != "completed":
                     self._set_agent_status("Aggressive Analyst", "in_progress")
                 self._set_report_section(
                     "final_trade_decision", f"### Aggressive Analyst Analysis\n{agg}"
                 )
-            if con:
+            if con and not judge:
                 if self._agent_status.get("Conservative Analyst") != "completed":
                     self._set_agent_status("Conservative Analyst", "in_progress")
                 self._set_report_section(
                     "final_trade_decision", f"### Conservative Analyst Analysis\n{con}"
                 )
-            if neu:
+            if neu and not judge:
                 if self._agent_status.get("Neutral Analyst") != "completed":
                     self._set_agent_status("Neutral Analyst", "in_progress")
                 self._set_report_section(
                     "final_trade_decision", f"### Neutral Analyst Analysis\n{neu}"
                 )
+            if judge:
+                self._set_report_section("final_trade_decision", judge)
             if judge and self._agent_status.get("Portfolio Manager") != "completed":
                 self._set_agent_status("Portfolio Manager", "in_progress")
-                self._set_report_section(
-                    "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
-                )
                 self._set_agent_status("Aggressive Analyst", "completed")
                 self._set_agent_status("Conservative Analyst", "completed")
                 self._set_agent_status("Neutral Analyst", "completed")
@@ -449,11 +426,9 @@ class AnalysisRunner:
             has_report = bool(self._report_sections.get(report_key))
             if has_report:
                 self._set_agent_status(agent_name, "completed")
-            elif not found_active:
+            else:
                 self._set_agent_status(agent_name, "in_progress")
                 found_active = True
-            else:
-                self._set_agent_status(agent_name, "pending")
 
         if (
             not found_active
@@ -533,7 +508,7 @@ def _extract_content_string(content) -> str | None:
 
 def _detect_asset_type(ticker: str) -> str:
     try:
-        from tradingagents.dataflows.symbol_utils import normalize_symbol
+        from tradingagents.dataflows.symbols import normalize_symbol
 
         canonical = normalize_symbol(ticker)
     except Exception:
@@ -574,134 +549,5 @@ def _classify_message(message) -> tuple:
 
 
 def save_report_to_disk(final_state: dict[str, Any], ticker: str, save_path: Path) -> Path:
-    """Persist the final report to disk using the CLI's folder layout.
-
-    Returns the path to the consolidated ``complete_report.md``.
-    """
-    save_path.mkdir(parents=True, exist_ok=True)
-    sections: list[str] = []
-
-    # 0. Investor briefing (plain-language summary, shown first)
-    briefing = final_state.get("investor_briefing")
-    if briefing:
-        summary_dir = save_path / "0_summary"
-        summary_dir.mkdir(exist_ok=True)
-        (summary_dir / "briefing.md").write_text(briefing, encoding="utf-8")
-        sections.append(f"## 0. Investor Briefing\n\n{briefing}")
-
-    # 1. Analysts
-    analysts_dir = save_path / "1_analysts"
-    analyst_parts = []
-    if final_state.get("market_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "market.md").write_text(
-            final_state["market_report"], encoding="utf-8"
-        )
-        analyst_parts.append(("Market Analyst", final_state["market_report"]))
-    if final_state.get("sentiment_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "sentiment.md").write_text(
-            final_state["sentiment_report"], encoding="utf-8"
-        )
-        analyst_parts.append(("Sentiment Analyst", final_state["sentiment_report"]))
-    if final_state.get("news_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "news.md").write_text(
-            final_state["news_report"], encoding="utf-8"
-        )
-        analyst_parts.append(("News Analyst", final_state["news_report"]))
-    if final_state.get("fundamentals_report"):
-        analysts_dir.mkdir(exist_ok=True)
-        (analysts_dir / "fundamentals.md").write_text(
-            final_state["fundamentals_report"], encoding="utf-8"
-        )
-        analyst_parts.append(
-            ("Fundamentals Analyst", final_state["fundamentals_report"])
-        )
-    if analyst_parts:
-        body = "\n\n".join(f"### {name}\n{text}" for name, text in analyst_parts)
-        sections.append(f"## I. Analyst Team Reports\n\n{body}")
-
-    # 2. Research debate
-    debate = final_state.get("investment_debate_state") or {}
-    if debate:
-        research_dir = save_path / "2_research"
-        research_parts = []
-        if debate.get("bull_history"):
-            research_dir.mkdir(exist_ok=True)
-            (research_dir / "bull.md").write_text(
-                debate["bull_history"], encoding="utf-8"
-            )
-            research_parts.append(("Bull Researcher", debate["bull_history"]))
-        if debate.get("bear_history"):
-            research_dir.mkdir(exist_ok=True)
-            (research_dir / "bear.md").write_text(
-                debate["bear_history"], encoding="utf-8"
-            )
-            research_parts.append(("Bear Researcher", debate["bear_history"]))
-        if debate.get("judge_decision"):
-            research_dir.mkdir(exist_ok=True)
-            (research_dir / "manager.md").write_text(
-                debate["judge_decision"], encoding="utf-8"
-            )
-            research_parts.append(("Research Manager", debate["judge_decision"]))
-        if research_parts:
-            body = "\n\n".join(f"### {n}\n{t}" for n, t in research_parts)
-            sections.append(f"## II. Research Team Decision\n\n{body}")
-
-    # 3. Trader
-    if final_state.get("trader_investment_plan"):
-        trading_dir = save_path / "3_trading"
-        trading_dir.mkdir(exist_ok=True)
-        (trading_dir / "trader.md").write_text(
-            final_state["trader_investment_plan"], encoding="utf-8"
-        )
-        sections.append(
-            "## III. Trading Team Plan\n\n### Trader\n"
-            + final_state["trader_investment_plan"]
-        )
-
-    # 4. Risk
-    risk = final_state.get("risk_debate_state") or {}
-    if risk:
-        risk_dir = save_path / "4_risk"
-        risk_parts = []
-        for key, label, fname in (
-            ("aggressive_history", "Aggressive Analyst", "aggressive.md"),
-            ("conservative_history", "Conservative Analyst", "conservative.md"),
-            ("neutral_history", "Neutral Analyst", "neutral.md"),
-        ):
-            if risk.get(key):
-                risk_dir.mkdir(exist_ok=True)
-                (risk_dir / fname).write_text(risk[key], encoding="utf-8")
-                risk_parts.append((label, risk[key]))
-        if risk_parts:
-            body = "\n\n".join(f"### {n}\n{t}" for n, t in risk_parts)
-            sections.append(f"## IV. Risk Management Team Decision\n\n{body}")
-
-        # 5. Portfolio
-        if risk.get("judge_decision"):
-            portfolio_dir = save_path / "5_portfolio"
-            portfolio_dir.mkdir(exist_ok=True)
-            (portfolio_dir / "decision.md").write_text(
-                risk["judge_decision"], encoding="utf-8"
-            )
-            pm_decision = final_state.get("pm_decision")
-            if pm_decision is not None:
-                import json as _json
-                (portfolio_dir / "decision.json").write_text(
-                    _json.dumps(pm_decision, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-            sections.append(
-                "## V. Portfolio Manager Decision\n\n### Portfolio Manager\n"
-                + risk["judge_decision"]
-            )
-
-    header = (
-        f"# Trading Analysis Report: {ticker}\n\n"
-        f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    )
-    out = save_path / "complete_report.md"
-    out.write_text(header + "\n\n".join(sections), encoding="utf-8")
-    return out
+    """Persist a report with the shared CLI/programmatic report writer."""
+    return write_report_tree(final_state, ticker, save_path)

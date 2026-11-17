@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from tradingagents.agents.utils.memory import TradingMemoryLog, _parse_pct
-from tradingagents.agents.utils.rating import direction
+from tradingagents.agents.rating import direction
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.memory import TradingMemoryLog
+from tradingagents.memory.log import _parse_pct
 
 
 def _scored(entry: dict) -> bool:

@@ -7,6 +7,7 @@ import yfinance as yf
 from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.errors import NoMarketDataError
 from tradingagents.dataflows.files import replace_file
+from tradingagents.dataflows.ohlcv_cache import cache_get, cache_put
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.dataflows.vendors.yahoo.common import raise_for_empty, yf_retry
 
@@ -175,6 +176,11 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     canonical = normalize_symbol(symbol)
     safe_symbol = safe_ticker_component(canonical)
 
+    cache_key = ("ohlcv", canonical, as_of_date, str(fill_gaps))
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     config = get_config()
     as_of_dt = pd.to_datetime(as_of_date).normalize()
 
@@ -253,6 +259,7 @@ def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataF
     # Reject a stale frame (latest row far older than as_of_date) rather than
     # feeding year-old prices into indicators (#1021).
     _assert_ohlcv_not_stale(data, as_of_date, symbol, canonical)
+    cache_put(cache_key, data)
 
     return data
 

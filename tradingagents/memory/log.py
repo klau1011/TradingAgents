@@ -8,6 +8,16 @@ from tradingagents.agents.rating import parse_rating
 from tradingagents.dataflows.files import locked
 
 
+def _parse_pct(value: str | None) -> float | None:
+    """Parse a log percentage in percent units, or None when unavailable."""
+    if not value:
+        return None
+    try:
+        return float(value.strip().rstrip("%"))
+    except ValueError:
+        return None
+
+
 class TradingMemoryLog:
     """Append-only markdown log of trading decisions and reflections."""
 
@@ -95,6 +105,9 @@ class TradingMemoryLog:
     ) -> str:
         """Return formatted past context string for agent prompt injection.
 
+        Same-ticker entries use recency; cross-ticker lessons use absolute alpha,
+        with decision recency breaking ties and unavailable alpha last.
+
         When ``as_of`` (yyyy-mm-dd) is given, only lessons whose outcome was
         already known by that date are included — an entry is kept only if it
         stores a resolution date (``resolved:...``) that is on or before
@@ -108,17 +121,15 @@ class TradingMemoryLog:
         if not entries:
             return ""
 
-        same, cross = [], []
         # Most recent by decision date, then by the later write: a backfill writes
         # older decisions last.
         newest = sorted(range(len(entries)), key=lambda i: (entries[i]["date"], i), reverse=True)
-        for e in (entries[i] for i in newest):
-            if len(same) >= n_same and len(cross) >= n_cross:
-                break
-            if e["ticker"] == ticker and len(same) < n_same:
-                same.append(e)
-            elif e["ticker"] != ticker and len(cross) < n_cross:
-                cross.append(e)
+        same = [entries[i] for i in newest if entries[i]["ticker"] == ticker][:n_same]
+        cross = [entries[i] for i in newest if entries[i]["ticker"] != ticker]
+        # shortcut: alpha magnitude ranks lessons; use semantic matching if relevance proves poor.
+        cross.sort(key=lambda e: abs(a) if (a := _parse_pct(e["alpha"])) is not None else -1,
+                   reverse=True)
+        cross = cross[:n_cross]
 
         if not same and not cross:
             return ""
@@ -128,7 +139,7 @@ class TradingMemoryLog:
             parts.append(f"Past analyses of {ticker} (most recent first):")
             parts.extend(self._format_full(e) for e in same)
         if cross:
-            parts.append("Recent cross-ticker lessons:")
+            parts.append("Recent cross-ticker lessons (largest realized alpha first):")
             parts.extend(self._format_reflection_only(e) for e in cross)
         return "\n\n".join(parts)
 

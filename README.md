@@ -17,15 +17,15 @@ This fork keeps all of that and builds new surfaces on top of it.
 
 ## What this fork adds
 
-Everything below is new in this fork (i.e. on top of upstream). The broad
-multi-provider LLM support and Claude Sonnet 5 / Fable 5 are **upstream**
-features, not fork additions.
+This fork preserves the additions below alongside upstream v0.7.1, including
+its current CLI, provider support, portfolio context, historical data guards,
+and memory-backed `backtest` command.
 
 - **Web dashboard** (`web/`) — FastAPI + React/Vite/TypeScript/Tailwind. Launch
   analyses from the browser, watch live progress over WebSocket, view an agent
   timeline/Gantt, cancel and resume runs, browse run history and past reports,
   read investor summaries, with API-key preflight and sanitized errors.
-- **Backtest / evaluation harness** (`tradingagents/backtest.py`) —
+- **Backtest / evaluation harness** (`tradingagents/evaluation.py`) —
   look-ahead-safe, resumable JSONL output, null baselines (buy-and-hold,
   always-Buy, seeded random), a cost model, and a confidence-weighted alpha
   metric.
@@ -39,9 +39,8 @@ features, not fork additions.
 - **Run-scoped OHLCV cache** — price/volume fetched once per run and reused.
 - **Extra volume indicators** — relative volume (rvol), volume z-score, and
   volume trend slope, with vendor fallback.
-- **Prediction-market tools** — event-probability signals for the analysts.
 - **Headless runner + typed event protocol** (`tradingagents/runner.py`,
-  `runner_events.py`) — the shared substrate the CLI and dashboard both sit on.
+  `runner_events.py`) — cancellable dashboard runs with live progress.
 - **Investor briefings + structured position sizing** — a dedicated briefing
   agent, plus stop-loss / position-size fields on the portfolio decision.
 - **GPT-5.6 models** in the catalog — Sol (deep), Luna (cost-sensitive),
@@ -63,12 +62,12 @@ see [`web/README.md`](web/README.md).
 
 ### Backtest / evaluation harness
 
-The harness is a Python API (not a CLI). It appends one JSONL row per evaluated
+The `tradingagents evaluate` command and Python API append one JSONL row per evaluated
 `(ticker, date)` and skips already-resolved points, so a killed run resumes for
 free.
 
 ```python
-from tradingagents.backtest import run_backtest
+from tradingagents.evaluation import run_backtest
 
 rows = run_backtest(
     tickers=["NVDA", "AAPL"],
@@ -81,7 +80,7 @@ rows = run_backtest(
 )
 ```
 
-See `tradingagents/backtest.py` for `summarize()`, baselines, and the cost model.
+See `tradingagents/evaluation.py` for `summarize()`, baselines, and the cost model.
 
 ### Per-stage model routing & adaptive risk debate
 
@@ -107,7 +106,7 @@ config["adaptive_extra_rounds"] = 2   # 0 = today's fixed cap
 For the full base install, provider API keys, Docker, and the interactive CLI,
 see the
 [upstream README](https://github.com/TauricResearch/TradingAgents#installation-and-cli).
-Minimal quickstart so this repo runs standalone:
+Requires Python 3.11 or newer. Minimal quickstart:
 
 ```bash
 git clone https://github.com/klau1011/TradingAgents.git

@@ -32,8 +32,7 @@ def create_neutral_debator(llm):
         past_context = state.get("past_context", "")
         lessons_block = (
             f"Past lessons from prior decisions and outcomes:\n{past_context}\n"
-            if past_context
-            else ""
+            if past_context else ""
         )
 
         prompt = f"""As the Neutral Risk Analyst, your role is to provide a balanced perspective, weighing both the potential benefits and risks of the trader's decision or plan. You prioritize a well-rounded approach, evaluating the upsides and downsides while factoring in broader market trends, potential economic shifts, and diversification strategies.Here is the trader's decision:

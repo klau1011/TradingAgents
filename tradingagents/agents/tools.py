@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.date_window import as_of, as_of_window
 from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
 from tradingagents.dataflows.router import no_data_available, route_to_vendor, vendor_unavailable
@@ -108,6 +109,8 @@ def get_fundamentals(
     Returns:
         str: A formatted report containing comprehensive fundamental data
     """
+    if get_config().get("disable_lookahead_tools"):
+        return "DATA_UNAVAILABLE: current snapshot is disabled in backtest/evaluation mode."
     return route_to_vendor("get_fundamentals", ticker, as_of(curr_date, trade_date))
 
 
@@ -226,6 +229,8 @@ def get_insider_transactions(
     Returns:
         str: A report of insider transaction data
     """
+    if get_config().get("disable_lookahead_tools"):
+        return "DATA_UNAVAILABLE: current snapshot is disabled in backtest/evaluation mode."
     return route_to_vendor("get_insider_transactions", ticker, trade_date or None)
 
 
@@ -288,4 +293,110 @@ def get_prediction_markets(
     Returns:
         str: A formatted markdown report of matching prediction markets
     """
+    if get_config().get("disable_lookahead_tools"):
+        return "DATA_UNAVAILABLE: current snapshot is disabled in backtest/evaluation mode."
     return route_to_vendor("get_prediction_markets", topic, limit, trade_date or None)
+
+
+@tool
+def get_etf_profile(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Retrieve ETF profile data: expense ratio, AUM, category, fund family,
+    yield, NAV, beta, inception date, and investment strategy description.
+    Use this instead of company-fundamentals tools when the instrument is an ETF.
+    Args:
+        ticker (str): ETF ticker symbol
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+    Returns:
+        str: A formatted ETF profile report
+    """
+    return route_to_vendor("get_etf_profile", ticker, as_of(curr_date, trade_date))
+
+
+@tool
+def get_etf_holdings(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    top_n: Annotated[int, "number of top holdings to return"] = 25,
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Retrieve the ETF's top constituent holdings with their portfolio weights.
+    Useful for assessing concentration risk and underlying exposure.
+    Args:
+        ticker (str): ETF ticker symbol
+        top_n (int): Number of top holdings to return (default 25)
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+    Returns:
+        str: A CSV-formatted list of top holdings and weights
+    """
+    return route_to_vendor("get_etf_holdings", ticker, top_n, as_of(curr_date, trade_date))
+
+
+@tool
+def get_etf_sector_weights(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Retrieve the ETF's sector allocation breakdown.
+    Useful for understanding thematic/sector exposure and diversification.
+    Args:
+        ticker (str): ETF ticker symbol
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+    Returns:
+        str: A formatted sector weight report
+    """
+    return route_to_vendor("get_etf_sector_weights", ticker, as_of(curr_date, trade_date))
+
+
+@tool
+def get_etf_correlation(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    benchmark: Annotated[str, "benchmark ticker (e.g. SPY, QQQ, IWM)"] = "SPY",
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"] = None,
+    lookback_days: Annotated[int, "trading-day window for correlation"] = 252,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Compute Pearson correlation, beta, and annualized volatility of the ETF's
+    daily returns versus a benchmark over the trailing window. Useful for
+    assessing whether an ETF adds diversification beyond a benchmark like SPY.
+    Args:
+        ticker (str): ETF ticker symbol
+        benchmark (str): Benchmark ticker, default "SPY"
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+        lookback_days (int): Window size in trading days, default 252
+    Returns:
+        str: A formatted correlation/beta/volatility report
+    """
+    return route_to_vendor(
+        "get_etf_correlation", ticker, benchmark, as_of(curr_date, trade_date), lookback_days
+    )
+
+
+@tool
+def get_live_quote(
+    symbol: Annotated[str, InjectedState("company_of_interest")],
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """Retrieve the current quote; unavailable for historical runs."""
+    if get_config().get("disable_lookahead_tools"):
+        return "DATA_UNAVAILABLE: current snapshot is disabled in backtest/evaluation mode."
+    return route_to_vendor("get_live_quote", symbol, trade_date or None)
+
+
+@tool
+def get_analyst_recommendations(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """Retrieve current analyst recommendations; unavailable for historical runs."""
+    if get_config().get("disable_lookahead_tools"):
+        return "DATA_UNAVAILABLE: current snapshot is disabled in backtest/evaluation mode."
+    return route_to_vendor("get_analyst_recommendations", ticker, trade_date or None)

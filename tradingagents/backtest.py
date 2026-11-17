@@ -1,451 +1,260 @@
-"""Evaluation / backtest harness: score the multi-agent analysis over a date range.
+"""Run the graph over a grid of tickers and dates, and score what came back.
 
-This is a *signal evaluation*, not a portfolio simulation. It measures whether the
-Portfolio Manager's rating predicts forward alpha vs the per-market benchmark.
+One run yields one decision, so it cannot say whether the system decides well.
+This runs the same machinery over many (ticker, date) cells and reads the
+aggregate. The memory log is the results table: every run already records its
+rating and later settles it with realized and alpha return against the
+instrument's regional benchmark, so there is nothing to record separately.
 
-# ponytail: signal-eval only — no position simulation or overlapping-position
-# netting. A flat per-call transaction cost and confidence-based weighting are
-# supported; a real portfolio simulator is a different problem from "does the
-# rating predict alpha".
-
-Reuses the already-built outcome math on ``TradingAgentsGraph``
-(``_fetch_returns`` / ``_resolve_benchmark``) and the structured decision it
-already returns in ``final_state["pm_decision"]`` — this module is orchestration
-and aggregation, not new analytics.
+Scope: this evaluates decision quality. It is not a portfolio simulator, and
+must not grow one. Turning a rating into a filled order needs a quantity, a fill
+price and a cash ledger, none of which the system has; inventing them here would
+put an execution model behind an evaluation tool. Cells are therefore
+independent, and a portfolio, when given, is the same standing book for every
+cell rather than a position carried forward.
 """
 
 from __future__ import annotations
 
-import json
+import itertools
 import logging
-import math
-import random
-from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
-
-from tradingagents.agents.utils.rating import direction as _direction
+from tradingagents.agents.rating import RATING_REVIEW
+from tradingagents.dataflows.date_window import get_current_date
+from tradingagents.dataflows.symbols import safe_ticker_component
+from tradingagents.evaluation import (
+    LOOKAHEAD_SAFE_ANALYSTS as LOOKAHEAD_SAFE_ANALYSTS,
+    render_report as render_report,
+    sample_dates as sample_dates,
+)
+from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.memory import TradingMemoryLog
 
 logger = logging.getLogger(__name__)
 
-# "social" (StockTwits/Reddit) returns "now" content regardless of the trade
-# date, so including it in a historical backtest leaks future information. The
-# other three analysts are date-bounded (price/indicators pinned to the trade
-# date; yfinance news is start/end bounded; statement fundamentals filtered by
-# curr_date) EXCEPT for the tools that read "now" — get_live_quote (market),
-# get_prediction_markets (news), get_fundamentals and
-# get_analyst_recommendations (fundamentals), and get_insider_transactions
-# (news). Those are neutralized via the ``disable_lookahead_tools`` config
-# flag set in ``_isolated_config`` below, which is what actually makes this
-# default safe. (Residual: the ETF profile tools still read "now"; guard them
-# the same way if ETF backtests become a real use case.)
-LOOKAHEAD_SAFE_ANALYSTS = ("market", "news", "fundamentals")
 
-_RATING_ORDER = {"Buy": 0, "Overweight": 1, "Hold": 2, "Underweight": 3, "Sell": 4}
-_CONF_ORDER = {"high": 0, "medium": 1, "low": 2}
+def iter_grid(start_date: str, end_date: str, every_n_days: int = 1) -> list[str]:
+    """Analysis dates from ``start_date``, never past today.
 
-# Position weight per confidence level for the confidence-weighted metric.
-_CONF_WEIGHT = {"low": 0.5, "medium": 1.0, "high": 1.5}
-_N_RANDOM_TRIALS = 1000
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers (no LLM, no network) — these are what the tests exercise.
-# ---------------------------------------------------------------------------
-
-
-def sample_dates(start: str, end: str, cadence_days: int) -> list[str]:
-    """Business days in [start, end], every ``cadence_days``-th, as YYYY-MM-DD."""
-    days = pd.bdate_range(start=start, end=end)
-    return [d.strftime("%Y-%m-%d") for d in days[:: max(1, cadence_days)]]
-
-
-def _sharpe(strat: list[float], directional: list[dict]) -> float | None:
-    """Annualized Sharpe of the per-call strategy alpha series.
-
-    # ponytail: this is a *signal* Sharpe (per-call alpha, equal weight), not a
-    # portfolio Sharpe. Annualized by the mean holding period; mixed horizons
-    # make the annualization approximate.
+    A future date has no outcome to settle against, and the graph rejects one, so
+    the grid stops at the present rather than producing cells that cannot score.
     """
-    n = len(strat)
-    if n < 2:
+    start, end = _canonical(start_date), _canonical(end_date)
+    if every_n_days < 1:
+        raise ValueError("every_n_days must be at least 1")
+    if end < start:
+        raise ValueError(f"the grid ends before it starts: {end_date} is before {start_date}")
+
+    last = min(end, datetime.strptime(get_current_date(), "%Y-%m-%d"))
+    dates, cursor = [], start
+    while cursor <= last:
+        dates.append(cursor.strftime("%Y-%m-%d"))
+        cursor += timedelta(days=every_n_days)
+    return dates
+
+
+def _canonical(date: str) -> datetime:
+    """Parse a grid bound, rejecting anything the run date would also reject."""
+    try:
+        parsed = datetime.strptime(str(date), "%Y-%m-%d")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"grid dates must be in YYYY-MM-DD format, got {date!r}") from exc
+    if parsed.strftime("%Y-%m-%d") != str(date):
+        raise ValueError(f"grid dates must be in YYYY-MM-DD format, got {date!r}")
+    return parsed
+
+
+def _alpha(entry: dict) -> float | None:
+    """Alpha return of a settled entry, or None when it has not settled.
+
+    The log stores it as a percentage rounded to one decimal, so aggregates here
+    are accurate to 0.1 of a percentage point, not to the raw quote.
+    """
+    text = (entry.get("alpha") or "").strip().rstrip("%")
+    try:
+        return float(text) / 100
+    except ValueError:
         return None
-    mean = sum(strat) / n
-    sd = math.sqrt(sum((x - mean) ** 2 for x in strat) / (n - 1))
-    if sd == 0:
-        return None
-    holds = [r["holding_days"] for r in directional if r.get("holding_days")]
-    mean_hold = (sum(holds) / len(holds)) if holds else 0
-    ann = math.sqrt(252 / mean_hold) if mean_hold else 1.0
-    return (mean / sd) * ann
 
 
-def _max_drawdown(strat: list[float]) -> float | None:
-    """Worst peak-to-trough of the cumulative (additive) strategy alpha. <= 0."""
-    if not strat:
-        return None
-    cum = peak = mdd = 0.0
-    for s in strat:
-        cum += s
-        peak = max(peak, cum)
-        mdd = min(mdd, cum - peak)
-    return mdd
+@dataclass
+class BacktestResult:
+    run_id: str
+    log_path: Path
+    cells_run: int = 0
+    skipped: int = 0
+    failures: list[tuple[str, str, str]] = field(default_factory=list)
+    settlement_failures: list[tuple[str, str]] = field(default_factory=list)
 
 
-def _calibration(resolved: list[dict]) -> list[dict]:
-    """Per (rating, confidence) bucket: n, hit-rate, mean (raw) alpha.
-
-    Hit-rate is the share of calls whose alpha sign matches the rating's
-    direction; it is ``None`` for Hold (no direction). Mean alpha is the raw
-    alpha so Buy buckets read positive and Sell buckets read negative.
-    """
-    buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for r in resolved:
-        buckets[(r["rating"], r.get("confidence") or "medium")].append(r)
-
-    out = []
-    for (rating, conf), rs in buckets.items():
-        d = _direction(rating)
-        alphas = [r["alpha_return"] for r in rs]
-        hit_rate = (
-            None if d == 0
-            else sum(1 for r in rs if d * r["alpha_return"] > 0) / len(rs)
-        )
-        out.append({
-            "rating": rating,
-            "confidence": conf,
-            "n": len(rs),
-            "hit_rate": hit_rate,
-            "mean_alpha": sum(alphas) / len(alphas),
-        })
-    out.sort(key=lambda b: (_RATING_ORDER.get(b["rating"], 99),
-                            _CONF_ORDER.get(b["confidence"], 99)))
-    return out
+# What each rating claims will happen, so an outcome can be scored against it.
+# Hold claims no direction, so nothing about alpha proves it right or wrong.
+_DIRECTION = {"Buy": 1, "Overweight": 1, "Hold": 0, "Underweight": -1, "Sell": -1}
 
 
-def _baselines(resolved: list[dict], *, cost: float, seed: int) -> dict:
-    """Null strategies over the same resolved points.
-
-    The signal has to beat these to be worth anything: buy-and-hold of the
-    evaluated names (raw), always-Buy (alpha), and random ±1 direction (alpha
-    distribution over ``_N_RANDOM_TRIALS`` seeded trials). Cost is charged per
-    call for the directional baselines, same as the strategy.
-    """
-    if not resolved:
-        return {"buy_hold_raw": None, "always_buy_alpha": None,
-                "random_alpha_mean": None, "random_alpha_std": None}
-    raws = [r["raw_return"] for r in resolved if r.get("raw_return") is not None]
-    alphas = [r["alpha_return"] for r in resolved]
-    rng = random.Random(seed)
-    trial_means = [
-        sum(rng.choice((1, -1)) * a - cost for a in alphas) / len(alphas)
-        for _ in range(_N_RANDOM_TRIALS)
-    ]
-    mean_t = sum(trial_means) / len(trial_means)
-    std_t = math.sqrt(
-        sum((x - mean_t) ** 2 for x in trial_means) / (len(trial_means) - 1)
-    )
-    return {
-        "buy_hold_raw": (sum(raws) / len(raws)) if raws else None,
-        "always_buy_alpha": sum(a - cost for a in alphas) / len(alphas),
-        "random_alpha_mean": mean_t,
-        "random_alpha_std": std_t,
-    }
+@dataclass
+class RatingScore:
+    count: int
+    hit_rate: float | None
+    mean_alpha: float
 
 
-def _by_confidence(directional: list[dict], strat: list[float]) -> list[dict]:
-    """Per confidence level over directional calls: n, hit-rate, mean captured alpha."""
-    buckets: dict[str, list[float]] = defaultdict(list)
-    for r, s in zip(directional, strat, strict=True):
-        buckets[r.get("confidence") or "medium"].append(s)
-    out = [
-        {
-            "confidence": conf,
-            "n": len(ss),
-            "hit_rate": sum(1 for s in ss if s > 0) / len(ss),
-            "mean_alpha": sum(ss) / len(ss),
-        }
-        for conf, ss in buckets.items()
-    ]
-    out.sort(key=lambda b: _CONF_ORDER.get(b["confidence"], 99))
-    return out
+@dataclass
+class BacktestSummary:
+    resolved: int
+    pending: int
+    by_rating: dict[str, RatingScore]
+    unscored: int = 0
+    holding: str = ""
 
-
-def _confidence_weighted_alpha(directional: list[dict], strat: list[float]) -> float | None:
-    """Mean captured alpha with positions scaled by confidence (0.5/1.0/1.5).
-
-    Cost is already inside ``strat``, so scaling a call scales its cost too —
-    consistent with sizing the actual position.
-    """
-    if not directional:
-        return None
-    weights = [
-        _CONF_WEIGHT.get(r.get("confidence") or "medium", 1.0) for r in directional
-    ]
-    return sum(w * s for w, s in zip(weights, strat, strict=True)) / sum(weights)
-
-
-def summarize(rows: list[dict], *, cost: float = 0.0, seed: int = 7) -> dict:
-    """Aggregate result rows into headline metrics + calibration and baselines.
-
-    ``cost`` is a flat round-trip transaction cost as a return fraction (e.g.
-    0.001 = 10 bps), charged once per directional call (Hold trades nothing).
-    It flows into every strategy metric and the directional baselines.
-    """
-    n_total = len(rows)
-    resolved = [r for r in rows if r.get("alpha_return") is not None]
-    directional = [r for r in resolved if _direction(r["rating"]) != 0]
-    strat = [_direction(r["rating"]) * r["alpha_return"] - cost for r in directional]
-    raws = [r["raw_return"] for r in directional if r.get("raw_return") is not None]
-
-    # Drawdown is path-dependent, so it must be chronological — the input/JSONL
-    # order is per-ticker, which would make a multi-ticker drawdown depend on
-    # ticker argument order. Aggregate same-date calls (equal weight) into one
-    # cumulative step and walk by date. (Hit-rate/mean/Sharpe above are
-    # order-independent, so they stay on the raw per-call series.)
-    by_date: dict[str, float] = defaultdict(float)
-    for r, s in zip(directional, strat, strict=True):
-        by_date[r["date"]] += s
-    dd_series = [by_date[d] for d in sorted(by_date)]
-
-    return {
-        "n_total": n_total,
-        "n_resolved": len(resolved),
-        "n_directional": len(directional),
-        "coverage": (len(resolved) / n_total) if n_total else None,
-        "cost": cost,
-        "hit_rate": (sum(1 for s in strat if s > 0) / len(strat)) if strat else None,
-        "mean_alpha": (sum(strat) / len(strat)) if strat else None,
-        "mean_raw": (sum(raws) / len(raws)) if raws else None,
-        "signal_sharpe": _sharpe(strat, directional),
-        "max_drawdown": _max_drawdown(dd_series),
-        "confidence_weighted_alpha": _confidence_weighted_alpha(directional, strat),
-        "baselines": _baselines(resolved, cost=cost, seed=seed),
-        "by_confidence": _by_confidence(directional, strat),
-        "calibration": _calibration(resolved),
-    }
-
-
-def _pct(x: float | None) -> str:
-    return "n/a" if x is None else f"{x:+.1%}"
-
-
-def _num(x: float | None) -> str:
-    return "n/a" if x is None else f"{x:.2f}"
-
-
-def render_report(summary: dict, *, meta: dict | None = None) -> str:
-    """Render the summary as a markdown report."""
-    lines = ["# Backtest report", ""]
-    if meta:
-        lines += [f"- {k}: {v}" for k, v in meta.items()] + [""]
-    base = summary["baselines"]
-    lines += [
-        "> Signal evaluation, not a portfolio simulation: rating direction vs "
-        "forward alpha, equal weight per call. The social (sentiment) analyst "
-        "is excluded unless `--include-social` was passed, because its "
-        "StockTwits/Reddit sources read 'now' and leak into historical dates. "
-        "Other 'now'-reading tools (live quote, prediction markets, "
-        "fundamentals overview, analyst recommendations, insider transactions) "
-        "are disabled in evaluation mode; ETF profile data may still read "
-        "'now'.",
-        "",
-        f"- points: {summary['n_total']}   resolved: {summary['n_resolved']}   "
-        f"coverage: {_pct(summary['coverage'])}",
-        f"- directional calls: {summary['n_directional']}",
-        f"- transaction cost per directional call: {_pct(summary['cost'])}",
-        f"- Hit-rate: {_num(summary['hit_rate'])}",
-        f"- Mean captured alpha: {_pct(summary['mean_alpha'])}",
-        f"- Confidence-weighted alpha: {_pct(summary['confidence_weighted_alpha'])}",
-        f"- Signal Sharpe (annualized): {_num(summary['signal_sharpe'])}",
-        f"- Max drawdown (cumulative alpha): {_pct(summary['max_drawdown'])}",
-        "",
-        "## Baselines (same points, no signal)",
-        "",
-        f"- Buy & hold (raw return): {_pct(base['buy_hold_raw'])}",
-        f"- Always-Buy (alpha): {_pct(base['always_buy_alpha'])}",
-        f"- Random ±1 (alpha, mean ± std over {_N_RANDOM_TRIALS} trials): "
-        f"{_pct(base['random_alpha_mean'])} ± {_pct(base['random_alpha_std'])}",
-        "",
-        "## By confidence (directional calls)",
-        "",
-        "| Confidence | n | Hit-rate | Mean alpha |",
-        "| --- | --- | --- | --- |",
-    ]
-    for b in summary["by_confidence"]:
+    def render(self) -> str:
+        lines = [f"Resolved cells: {self.resolved} · pending: {self.pending}"
+                 + (f" · unscored: {self.unscored}" if self.unscored else "")]
+        for rating, score in self.by_rating.items():
+            called = (f"called the direction {score.hit_rate:.0%}"
+                      if score.hit_rate is not None else "no direction claimed")
+            lines.append(
+                f"- {rating}: n={score.count}, {called}, "
+                f"mean alpha {score.mean_alpha:+.2%} vs the benchmark"
+            )
+        lines.append("")
+        if self.pending:
+            lines.append("Pending cells are not scored above; re-run to settle them.")
         lines.append(
-            f"| {b['confidence']} | {b['n']} | "
-            f"{_num(b['hit_rate'])} | {_pct(b['mean_alpha'])} |"
+            f"Alpha is measured over {self.holding} from the first close after each analysis date. "
+            "One model sampling per cell, and text feeds are not archived, so "
+            "these figures are indicative rather than repeatable."
         )
-    lines += [
-        "",
-        "## Calibration (rating × confidence)",
-        "",
-        "| Rating | Confidence | n | Hit-rate | Mean alpha |",
-        "| --- | --- | --- | --- | --- |",
-    ]
-    for b in summary["calibration"]:
-        lines.append(
-            f"| {b['rating']} | {b['confidence']} | {b['n']} | "
-            f"{_num(b['hit_rate'])} | {_pct(b['mean_alpha'])} |"
-        )
-    return "\n".join(lines)
+        return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Orchestration (runs the agents — expensive; injected for tests).
-# ---------------------------------------------------------------------------
+def _new_run(runs: Path) -> str:
+    """A new run's id, stamped now, and its directory, claimed so no other sweep shares it."""
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    runs.mkdir(parents=True, exist_ok=True)
+    for n in itertools.count(1):
+        run_id = stamp if n == 1 else f"{stamp}_{n}"
+        try:
+            (runs / run_id).mkdir()
+            return run_id
+        except FileExistsError:
+            continue
 
 
-def _load_existing(results_path: Path) -> list[dict]:
-    if not results_path.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in results_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+def _run_memory_backtest(
+    tickers: list[str],
+    dates: list[str],
+    config: dict,
+    asset_type: str = "stock",
+    portfolio=None,
+    selected_analysts=("market", "social", "news", "fundamentals"),
+    run_id: str | None = None,
+    progress: Callable[[int, int, str, str], None] | None = None,
+) -> BacktestResult:
+    """Analyze every ticker on every date, into a memory log of this run's own.
 
-
-def _key(ticker: str, date: str) -> tuple[str, str]:
-    return (ticker.upper(), date)
-
-
-def _append_row(results_path: Path, row: dict) -> None:
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    with results_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row) + "\n")
-
-
-def _run_point_llm(
-    ticker: str, date: str, *, selected_analysts, config, holding_days: int,
-) -> dict:
-    """Run the full pipeline for one (ticker, date) and resolve its outcome."""
-    from tradingagents.graph.trading_graph import TradingAgentsGraph
-
-    graph = TradingAgentsGraph(list(selected_analysts), config=config)
-    final_state, signal = graph.propagate(ticker, date)
-    pm = (final_state or {}).get("pm_decision") or {}
-    rating = pm.get("rating") or signal or "Hold"
-    confidence = pm.get("confidence") or "medium"
-    benchmark = graph._resolve_benchmark(ticker)
-    raw, alpha, days = graph._fetch_returns(ticker, date, holding_days, benchmark)
-    return {
-        "ticker": ticker.upper(),
-        "date": date,
-        "rating": rating,
-        "confidence": confidence,
-        "raw_return": raw,
-        "alpha_return": alpha,
-        "holding_days": days,
-        "benchmark": benchmark,
-    }
-
-
-def _isolated_config(config: dict | None, out_dir: Path) -> dict:
-    """Config for an evaluation run: isolated state + look-ahead guard.
-
-    A backtest must not touch live state. Without this, every point would
-    read/write the user's real memory log (storing historical decisions and
-    feeding eval-generated reflections into later live *and* backtest runs) and
-    write graph logs/caches under the user's results dir. So:
-
-    - ``memory_log_path=None`` → no-memory eval mode: each point is an
-      independent measurement (TradingMemoryLog no-ops when the path is unset).
-    - ``results_dir``/``data_cache_dir`` redirected under the backtest output.
-    - ``checkpoint_enabled=False`` → no per-point checkpoint churn.
-    - ``disable_lookahead_tools=True`` → neutralizes the "now"-reading tools
-      (get_live_quote, get_prediction_markets, get_fundamentals,
-      get_analyst_recommendations, get_insider_transactions) that the
-      date-bounded default analysts can otherwise call.
+    The live log stays untouched: a sweep would otherwise flood the context that
+    real runs read back. Cells already in this run's log are skipped, so an
+    interrupted sweep resumes by being run again. ``progress(done, total,
+    ticker, date)`` is called before each cell that runs.
     """
-    from tradingagents.default_config import DEFAULT_CONFIG
+    runs = Path(config["results_dir"]) / "backtest"
+    if run_id:
+        # run_id becomes a path segment, so it is validated like a ticker: an
+        # absolute or dotted value would otherwise place the run outside results_dir.
+        run_id = safe_ticker_component(run_id)
+        (runs / run_id).mkdir(parents=True, exist_ok=True)
+    else:
+        run_id = _new_run(runs)
+    run_dir = runs / run_id
+    run_config = {**config, "results_dir": str(run_dir),
+                  "memory_log_path": str(run_dir / "trading_memory.md")}
 
-    cfg = dict(config if config is not None else DEFAULT_CONFIG)
-    cfg["memory_log_path"] = None
-    cfg["results_dir"] = str(out_dir / "graph_logs")
-    cfg["data_cache_dir"] = str(out_dir / "cache")
-    cfg["checkpoint_enabled"] = False
-    cfg["disable_lookahead_tools"] = True
-    return cfg
+    graph = TradingAgentsGraph(selected_analysts, config=run_config)
+    result = BacktestResult(run_id=run_id, log_path=Path(run_config["memory_log_path"]))
+    done = {(e["ticker"], e["date"]) for e in graph.memory_log.load_entries()}
 
+    # A ticker or date given twice is one cell, run and settled once.
+    tickers, dates = list(dict.fromkeys(tickers)), list(dict.fromkeys(dates))
+    cells = [(ticker, date) for ticker in tickers for date in dates]
+    todo = [cell for cell in cells if cell not in done]
+    result.skipped = len(cells) - len(todo)
+    for index, (ticker, date) in enumerate(todo, 1):
+        if progress:
+            progress(index, len(todo), ticker, date)
+        try:
+            graph.propagate(ticker, date, asset_type, portfolio=portfolio)
+            result.cells_run += 1
+        except Exception as exc:  # one unreachable vendor must not end the sweep
+            logger.warning("Backtest cell %s %s failed: %s", ticker, date, exc)
+            result.failures.append((ticker, date, str(exc)))
 
-def run_backtest(
-    tickers: Sequence[str],
-    start: str,
-    end: str,
-    *,
-    cadence_days: int = 21,
-    holding_days: int = 5,
-    selected_analysts: Sequence[str] = LOOKAHEAD_SAFE_ANALYSTS,
-    config: dict | None = None,
-    results_path: str | Path,
-    run_point: Callable | None = None,
-) -> list[dict]:
-    """Evaluate the system over ``tickers`` across [start, end].
-
-    Appends one JSONL row per evaluated (ticker, date) to ``results_path`` and
-    skips any point already *resolved* there, so a killed run resumes for free.
-    ``run_point`` is injected in tests; production uses the LLM pipeline.
-    """
-    results_path = Path(results_path)
-    dates = sample_dates(start, end, cadence_days)
-    eval_config = _isolated_config(config, results_path.parent)
-
-    if holding_days > cadence_days:
-        logger.warning(
-            "holding_days (%d) > cadence_days (%d): forward windows overlap, "
-            "which inflates Sharpe and drawdown.", holding_days, cadence_days,
-        )
-
-    # Only points with a *resolved* outcome are complete. An unresolved row
-    # (price data too recent or a transient fetch failure) must not look done
-    # forever, or its outcome would never be retried once data arrives — so we
-    # drop unresolved rows from both the resume set and the report and re-run
-    # them below. (New runs never persist unresolved rows; this guards files
-    # left by an interrupted older run.)
-    rows = [r for r in _load_existing(results_path) if r.get("alpha_return") is not None]
-    done = {_key(r["ticker"], r["date"]) for r in rows}
-    runner = run_point or _run_point_llm
-
-    skipped = sum(
-        1 for t in tickers for d in dates if _key(t, d) in done
-    )
-    if skipped:
-        logger.info("Resuming: skipping %d already-resolved points.", skipped)
-
+    # Settlement runs at the start of the next run for a ticker, so each ticker's
+    # last cell would stay pending without this pass.
     for ticker in tickers:
-        for date in dates:
-            if _key(ticker, date) in done:
-                continue
-            try:
-                row = runner(
-                    ticker, date,
-                    selected_analysts=selected_analysts,
-                    config=eval_config,
-                    holding_days=holding_days,
-                )
-            except Exception as e:
-                # One bad point (LLM/network blip, bad ticker) must not kill an
-                # expensive multi-point sweep. Don't persist it, so a re-run
-                # retries it while the completed points are skipped.
-                logger.warning("Skipping %s on %s: %s", ticker, date, e)
-                continue
-            if row.get("alpha_return") is None:
-                # Decision ran but the forward outcome isn't resolvable yet
-                # (too recent) or the price fetch failed. Treat like a failure:
-                # don't persist, so a later run retries it. (ponytail: this
-                # re-runs the LLM on retry; acceptable since historical
-                # backtests resolve first try and only the recent edge hits it.)
-                logger.warning(
-                    "Outcome unresolved for %s on %s; not persisting so a later "
-                    "run retries it.", ticker, date,
-                )
-                continue
-            _append_row(results_path, row)
-            rows.append(row)
-            done.add(_key(ticker, date))
+        try:
+            settlement = graph.settle_pending(ticker)
+            result.settlement_failures.extend(
+                (failed_ticker, f"{date}: {reason}")
+                for failed_ticker, date, reason in settlement.failed
+            )
+        except Exception as exc:  # reflection calls an LLM; one failure is not the sweep's
+            logger.warning("Settling %s failed: %s", ticker, exc)
+            result.settlement_failures.append((ticker, str(exc)))
+    return result
 
-    return rows
+
+def _summarize_memory_log(source: BacktestResult | str | Path) -> BacktestSummary:
+    """Score the settled decisions of a backtest, or of a memory log at a path, by rating."""
+    if isinstance(source, BacktestResult):
+        path = source.log_path      # a run whose cells all failed wrote no log: nothing to score
+    elif Path(source).is_file():
+        path = Path(source)
+    else:
+        raise FileNotFoundError(f"no memory log at {source}")
+    entries = TradingMemoryLog({"memory_log_path": str(path)}).load_entries()
+    # A decision with no readable rating has no direction, so it can neither
+    # count for nor against the system; it is reported as unscored instead.
+    resolved = [(e, _alpha(e)) for e in entries
+                if not e["pending"] and e["rating"] != RATING_REVIEW]
+    resolved = [(e, a) for e, a in resolved if a is not None]
+    by_rating: dict[str, RatingScore] = {}
+    for rating in dict.fromkeys(e["rating"] for e, _ in resolved):
+        alphas = [a for e, a in resolved if e["rating"] == rating]
+        direction = _DIRECTION.get(rating, 0)
+        by_rating[rating] = RatingScore(
+            count=len(alphas),
+            hit_rate=(sum(a * direction > 0 for a in alphas) / len(alphas)) if direction else None,
+            mean_alpha=sum(alphas) / len(alphas),
+        )
+    unscored = sum(1 for e in entries if e["rating"] == RATING_REVIEW)
+    # Report the window the outcomes were actually measured over, from the log.
+    windows = {f"{e['holding'][:-1]} trading days" for e, _ in resolved
+               if (e.get("holding") or "").endswith("d")}
+    return BacktestSummary(resolved=len(resolved),
+                           pending=len(entries) - len(resolved) - unscored,
+                           by_rating=by_rating, unscored=unscored,
+                           holding=", ".join(sorted(windows)) or "the configured window")
+
+
+# The fork's JSONL evaluator predates the memory-log sweep; retain both call shapes.
+def run_backtest(*args, **kwargs):
+    """Run a memory-log grid, or the legacy JSONL evaluator with start/end dates."""
+    if (len(args) > 1 and isinstance(args[1], str)) or any(
+        key in kwargs for key in ("start", "end", "results_path")
+    ):
+        from tradingagents.evaluation import run_backtest as evaluate
+        return evaluate(*args, **kwargs)
+    return _run_memory_backtest(*args, **kwargs)
+
+
+def summarize(source, **kwargs):
+    """Summarize a memory log or legacy JSONL result rows."""
+    if isinstance(source, list):
+        from tradingagents.evaluation import summarize as summarize_rows
+        return summarize_rows(source, **kwargs)
+    return _summarize_memory_log(source, **kwargs)

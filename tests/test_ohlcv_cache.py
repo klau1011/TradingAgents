@@ -7,7 +7,6 @@ import threading
 from unittest.mock import patch
 
 import pandas as pd
-import pytest
 
 from tradingagents.dataflows.ohlcv_cache import (
     cache_get,
@@ -53,11 +52,11 @@ def test_cache_isolated_across_runs():
 
 def test_load_ohlcv_dedupes_within_run():
     """Two ``load_ohlcv`` calls inside a run trigger only one fetch."""
-    from tradingagents.dataflows import stockstats_utils
+    from tradingagents.dataflows.vendors.yahoo import ohlcv as stockstats_utils
 
     fake_payload = pd.DataFrame(
         {
-            "Date": pd.date_range("2024-01-01", periods=3),
+            "Date": pd.date_range("2026-04-23", periods=3),
             "Open": [1.0, 2.0, 3.0],
             "High": [1.0, 2.0, 3.0],
             "Low": [1.0, 2.0, 3.0],
@@ -77,7 +76,7 @@ def test_load_ohlcv_dedupes_within_run():
     with patch.object(stockstats_utils.os.path, "exists", return_value=False), \
         patch.object(stockstats_utils, "yf_retry", side_effect=fake_yf_retry), \
         patch.object(stockstats_utils.os, "makedirs"), \
-        patch("pandas.DataFrame.to_csv"):
+        patch.object(stockstats_utils, "replace_file"):
         with start_run_cache():
             stockstats_utils.load_ohlcv("AAPL", "2026-04-25")
             stockstats_utils.load_ohlcv("AAPL", "2026-04-25")
@@ -104,8 +103,10 @@ def test_concurrent_runs_have_independent_caches():
 
     t1 = threading.Thread(target=worker, args=("AAPL", 100.0))
     t2 = threading.Thread(target=worker, args=("MSFT", 200.0))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     assert results["AAPL"] == (100.0, None)
     assert results["MSFT"] == (200.0, None)
@@ -129,3 +130,19 @@ def test_concurrent_runs_async_have_independent_caches():
     a, b = asyncio.run(runner())
     assert a == (100.0, None)
     assert b == (200.0, None)
+
+
+def test_price_report_dedupes_within_run(monkeypatch):
+    from tradingagents.dataflows.vendors.yahoo import market
+    frame = pd.DataFrame({"Close": [100.]}, index=pd.DatetimeIndex(["2026-04-24"]))
+    calls = []
+    def fetch(thunk):
+        calls.append(1)
+        return frame.copy()
+    monkeypatch.setattr(market, "yf_retry", fetch)
+    with start_run_cache():
+        first = market.get_YFin_data_online("AAPL", "2026-04-24", "2026-04-24")
+        assert market.get_YFin_data_online("AAPL", "2026-04-24", "2026-04-24") == first
+    assert len(calls) == 1
+    market.get_YFin_data_online("AAPL", "2026-04-24", "2026-04-24")
+    assert len(calls) == 2

@@ -1,31 +1,31 @@
 """Portfolio Manager: synthesises the risk-analyst debate into the final decision.
 
 Uses LangChain's ``with_structured_output`` so the LLM produces a typed
-``PortfolioDecision`` directly, in a single call.  The result is rendered
-back to markdown for storage in ``final_trade_decision`` so memory log,
-CLI display, and saved reports continue to consume the same shape they do
-today.  When a provider does not expose structured output, the agent falls
-back gracefully to free-text generation.
+``PortfolioDecision`` directly, in a single call. Its rating is the run's
+``final_rating``, and the decision is rendered to markdown as
+``final_trade_decision`` for the memory log, CLI display and saved reports.
+When a provider does not expose structured output, the agent falls back to
+free-text generation and the rating is read from that text.
 """
 
 from __future__ import annotations
 
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
-from tradingagents.agents.utils.agent_utils import (
-    build_instrument_context,
+from tradingagents.agents.context import (
+    get_instrument_context_from_state,
     get_language_instruction,
+    get_portfolio_context_from_state,
 )
-from tradingagents.agents.utils.structured import (
-    bind_structured,
-    invoke_structured_or_freetext_with_object,
-)
+from tradingagents.agents.rating import parse_rating
+from tradingagents.agents.schemas import RATING_BAR_GUIDANCE, PortfolioDecision, render_pm_decision
+from tradingagents.agents.structured import NO_EXTERNAL_TOOLS, bind_structured, invoke_structured
 
 
 def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
 
     def portfolio_manager_node(state) -> dict:
-        instrument_context = build_instrument_context(state["company_of_interest"])
+        instrument_context = get_instrument_context_from_state(state)
+        portfolio_context = get_portfolio_context_from_state(state)
 
         history = state["risk_debate_state"]["history"]
         risk_debate_state = state["risk_debate_state"]
@@ -43,16 +43,16 @@ def create_portfolio_manager(llm):
 
 {instrument_context}
 
+{portfolio_context}
+
 ---
 
 **Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add — the bull thesis survived the strongest bear objection and a named catalyst with a timeline supports it
-- **Overweight**: Favorable outlook that does not clear the Buy bar; gradually increase exposure
-- **Hold**: Evidence genuinely balanced, or the deciding fact is missing; no action
-- **Underweight**: Cautious outlook that does not clear the Sell bar; reduce exposure, take partial profits
-- **Sell**: Strong conviction to exit or avoid — the bear thesis survived the strongest bull objection and a named catalyst with a timeline supports it
-
-Buy and Sell are conviction calls and must clear that bar; Overweight and Underweight are the ordinary directional ratings. Hold is a legitimate answer when the deciding evidence is absent — but do not use it to dodge a side the evidence supports.
+- **Buy**: Strong conviction to enter or add to position
+- **Overweight**: Favorable outlook, gradually increase exposure
+- **Hold**: Maintain current position, no action needed
+- **Underweight**: Reduce exposure, take partial profits
+- **Sell**: Exit position or avoid entry
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
@@ -63,20 +63,32 @@ Buy and Sell are conviction calls and must clear that bar; Overweight and Underw
 
 ---
 
-Be decisive and ground every conclusion in specific evidence from the analysts. State your confidence (low/medium/high) in the rating based on the strength of the evidence and how much the risk analysts agreed.
+Ground every conclusion in specific evidence from the analysts. The risk debate always contains conflicting stances; deciding which is stronger is the job, so conflict alone is not a reason to Hold. Commit to the stronger case, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after that weighing, or too thin to support a call; do not force a direction to appear decisive. Weigh the analysts on their merits, independent of speaking order.
 
-The risk analysts were each assigned a stance, so weigh the substance of their arguments rather than their conviction. Finally, name what would change this rating, using the two adjacent tiers that actually exist on the scale: for a middle rating give the development that would move it one tier more bullish and the one that would move it one tier more bearish; for Buy (nothing above it) give what would knock it down to Overweight and what would confirm holding it at Buy; for Sell (nothing below it) give what would lift it to Underweight and what would confirm holding it at Sell. Never name a tier outside Buy / Overweight / Hold / Underweight / Sell. Make each trigger concrete enough to check on a later re-analysis.{get_language_instruction()}"""
+{RATING_BAR_GUIDANCE}
+State confidence (low/medium/high) based on the evidence. Name concrete triggers that would move the rating one adjacent tier in each direction; at Buy or Sell, name what would confirm the extreme and what would move it inward.
 
-        final_trade_decision, decision_obj = invoke_structured_or_freetext_with_object(
-            structured_llm,
-            llm,
-            prompt,
-            render_pm_decision,
-            "Portfolio Manager",
-        )
+## Output
+
+Write these sections, in this order, starting with the rating on its own line:
+
+- **Rating**: exactly one of Buy / Overweight / Hold / Underweight / Sell
+- **Executive Summary**: the call and how to act on it
+- **Investment Thesis**: the evidence that decided it, and what would change it
+
+{NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
+
+        # The typed rating is the decision; the rendered text only carries it.
+        # Read back from text, a rating the thesis quotes could replace it.
+        decision = invoke_structured(structured_llm, prompt, "Portfolio Manager")
+        if decision is not None:
+            final_trade_decision = render_pm_decision(decision)
+            final_rating = decision.rating.value
+        else:
+            final_trade_decision = llm.invoke(prompt).content
+            final_rating = parse_rating(final_trade_decision)
 
         new_risk_debate_state = {
-            "judge_decision": final_trade_decision,
             "history": risk_debate_state["history"],
             "aggressive_history": risk_debate_state["aggressive_history"],
             "conservative_history": risk_debate_state["conservative_history"],
@@ -91,7 +103,8 @@ The risk analysts were each assigned a stance, so weigh the substance of their a
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
-            "pm_decision": decision_obj.model_dump(mode="json") if decision_obj is not None else None,
+            "final_rating": final_rating,
+            "pm_decision": decision.model_dump(mode="json") if decision is not None else None,
         }
 
     return portfolio_manager_node

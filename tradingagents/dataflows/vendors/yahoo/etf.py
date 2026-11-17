@@ -11,14 +11,18 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import datetime, timezone
+from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Annotated
 
 import pandas as pd
 import yfinance as yf
 
-from .config import get_config
-from .stockstats_utils import load_ohlcv, yf_retry
+from tradingagents.dataflows.config import get_config
+from tradingagents.dataflows.date_window import withhold_live_profile
+from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
+from tradingagents.dataflows.vendors.yahoo.common import yf_retry
+from tradingagents.dataflows.vendors.yahoo.ohlcv import load_ohlcv
 
 # Holdings/sectors update slowly; cache aggressively.
 _ETF_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60  # 24 hours
@@ -28,7 +32,7 @@ def _etf_cache_path(symbol: str, kind: str, ext: str = "json") -> str:
     config = get_config()
     cache_dir = os.path.join(config["data_cache_dir"], "etf")
     os.makedirs(cache_dir, exist_ok=True)
-    return os.path.join(cache_dir, f"{symbol.upper()}-{kind}.{ext}")
+    return os.path.join(cache_dir, f"{safe_ticker_component(symbol)}-{kind}.{ext}")
 
 
 def _read_json_cache(path: str):
@@ -38,7 +42,7 @@ def _read_json_cache(path: str):
     if age > _ETF_CACHE_MAX_AGE_SECONDS:
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -81,7 +85,7 @@ def _format_unix_date(value) -> str:
     if value in (None, "", 0):
         return "N/A"
     try:
-        return datetime.fromtimestamp(int(value), tz=timezone.utc).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(int(value), tz=UTC).strftime("%Y-%m-%d")
     except (TypeError, ValueError, OSError, OverflowError):
         return str(value)
 
@@ -104,7 +108,10 @@ def get_etf_profile(
     curr_date: Annotated[str, "current date (unused, for routing parity)"] = None,
 ) -> str:
     """Return ETF profile: expense ratio, AUM, category, yield, NAV, beta, fund family."""
-    symbol = ticker.upper()
+    symbol = normalize_symbol(ticker)
+    withheld = withhold_live_profile(curr_date, symbol)
+    if withheld:
+        return withheld
     cache_path = _etf_cache_path(symbol, "profile")
     cached = _read_json_cache(cache_path)
     if cached is not None:
@@ -181,7 +188,10 @@ def get_etf_holdings(
     curr_date: Annotated[str, "current date (unused, for routing parity)"] = None,
 ) -> str:
     """Return the ETF's top holdings (constituents and weights)."""
-    symbol = ticker.upper()
+    symbol = normalize_symbol(ticker)
+    withheld = withhold_live_profile(curr_date, symbol)
+    if withheld:
+        return withheld
     cache_path = _etf_cache_path(symbol, "holdings", ext="csv")
 
     df = None
@@ -205,15 +215,10 @@ def get_etf_holdings(
 
         if df is None or (hasattr(df, "empty") and df.empty):
             return f"No holdings data available for '{ticker}'."
-        try:
+        with suppress(Exception):
             df.to_csv(cache_path)
-        except Exception:
-            pass
 
-    try:
-        df = df.head(int(top_n))
-    except Exception:
-        pass
+    df = df.head(int(top_n))
 
     header = (
         f"# Top {len(df)} Holdings for {symbol}\n"
@@ -227,7 +232,10 @@ def get_etf_sector_weights(
     curr_date: Annotated[str, "current date (unused, for routing parity)"] = None,
 ) -> str:
     """Return the ETF's sector weight breakdown."""
-    symbol = ticker.upper()
+    symbol = normalize_symbol(ticker)
+    withheld = withhold_live_profile(curr_date, symbol)
+    if withheld:
+        return withheld
     cache_path = _etf_cache_path(symbol, "sectors")
     cached = _read_json_cache(cache_path)
     if cached is not None:
@@ -242,7 +250,7 @@ def get_etf_sector_weights(
         except Exception as e:
             return f"Error retrieving sector weights for {ticker}: {e}"
 
-        if not weights:
+        if weights is None or (isinstance(weights, dict) and not weights):
             return f"No sector weight data available for '{ticker}'."
 
         # ``sector_weightings`` may be a dict {sector: weight} or a DataFrame.
@@ -273,8 +281,8 @@ def get_etf_correlation(
     lookback_days: Annotated[int, "trading-day window for correlation"] = 252,
 ) -> str:
     """Compute Pearson correlation of daily returns vs. a benchmark."""
-    symbol = ticker.upper()
-    bench = (benchmark or "SPY").upper()
+    symbol = normalize_symbol(ticker)
+    bench = normalize_symbol(benchmark or "SPY")
     if curr_date is None:
         curr_date = datetime.now().strftime("%Y-%m-%d")
 

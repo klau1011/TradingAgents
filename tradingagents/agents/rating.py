@@ -115,3 +115,18 @@ def run_rating(final_state: dict) -> str:
 def is_review(signal: str) -> bool:
     """Whether a signal is the non-tradeable REVIEW sentinel (#1170)."""
     return signal == RATING_REVIEW
+
+
+RATING_DIRECTION = {"buy": 1, "overweight": 1, "hold": 0, "underweight": -1, "sell": -1}
+
+
+def direction(rating: str | None) -> int:
+    """Map a known rating to long, flat or short direction."""
+    return RATING_DIRECTION.get((rating or "").strip().lower(), 0)
+
+
+def extract_action(text: str) -> str | None:
+    """Read a trader action or research recommendation without searching prose."""
+    values = re.findall(r"^\s*(?:[-*]\s+)?\*{0,2}(?:Action|Recommendation)\*{0,2}\s*:\s*\*{0,2}(Buy|Overweight|Hold|Underweight|Sell)\b", text, re.I | re.M)
+    found = {value.capitalize() for value in values}
+    return found.pop() if len(found) == 1 else None

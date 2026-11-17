@@ -1,4 +1,5 @@
-from tradingagents.agents.utils.agent_utils import get_language_instruction
+from tradingagents.agents.context import get_language_instruction
+from tradingagents.agents.rating import run_rating
 
 
 def create_investor_briefing(llm):
@@ -11,6 +12,7 @@ def create_investor_briefing(llm):
     """
 
     def investor_briefing_node(state) -> dict:
+        rating = run_rating(state)
         ticker = state.get("company_of_interest", "")
         trade_date = state.get("trade_date", "")
         final_decision = state.get("final_trade_decision", "") or ""
@@ -41,6 +43,9 @@ The professional team has already finished their analysis. Your job is ONLY to t
 **Ticker**: {ticker}
 **Date of analysis**: {trade_date}
 
+**Canonical final rating**: {rating}
+If the rating is REVIEW, explain that the decision requires review and do not recommend a trade.
+
 **Final decision from the Portfolio Manager** (this is the source of truth — your "What To Do Today" section MUST match this):
 {final_decision}
 
@@ -49,6 +54,10 @@ The professional team has already finished their analysis. Your job is ONLY to t
 
 **Research team's plan**:
 {research_plan}
+
+**Bear case and risk debate**:
+{state.get("investment_debate_state", {}).get("bear_history", "")}
+{state.get("risk_debate_state", {}).get("history", "")}
 
 **Underlying analyst reports**:
 {analyst_context}

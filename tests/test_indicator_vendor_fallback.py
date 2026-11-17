@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tradingagents.dataflows import interface
+from tradingagents.dataflows import router as interface
 
 
 def test_route_to_vendor_falls_back_when_primary_indicator_vendor_rejects_indicator(
@@ -10,7 +10,7 @@ def test_route_to_vendor_falls_back_when_primary_indicator_vendor_rejects_indica
 ) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr(interface, "get_vendor", lambda category, method=None: "alpha_vantage")
+    monkeypatch.setattr(interface, "get_vendor", lambda category, method=None: "alpha_vantage,yfinance")
 
     def alpha_vantage_impl(*args, **kwargs):
         calls.append("alpha_vantage")
@@ -38,7 +38,7 @@ def test_route_to_vendor_falls_back_when_primary_indicator_vendor_rejects_indica
 def test_route_to_vendor_raises_last_value_error_when_all_indicator_vendors_fail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(interface, "get_vendor", lambda category, method=None: "alpha_vantage")
+    monkeypatch.setattr(interface, "get_vendor", lambda category, method=None: "alpha_vantage,yfinance")
 
     def alpha_vantage_impl(*args, **kwargs):
         raise ValueError("alpha_vantage: Indicator rvol is not supported")

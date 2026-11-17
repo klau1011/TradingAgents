@@ -2,7 +2,7 @@
 
 import pytest
 
-from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.memory import TradingMemoryLog
 from web.backend.track_record import get_track_record
 
 SEP = TradingMemoryLog._SEPARATOR
@@ -64,7 +64,7 @@ class TestTrackRecord:
 
     def test_avg_alpha_matches_backtest_mean_alpha(self, tmp_path):
         """Same definition as backtest.summarize's mean_alpha (direction-applied)."""
-        from tradingagents.backtest import summarize
+        from tradingagents.evaluation import summarize
 
         tags_and_rows = [
             ("[2026-01-05 | A | Overweight | +3.0% | +2.0% | 5d]", "Overweight", 0.02),

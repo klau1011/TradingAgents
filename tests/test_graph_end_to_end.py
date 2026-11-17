@@ -136,13 +136,18 @@ def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, st
     state, signal = graph.propagate("NVDA", TRADE_DATE)
 
     assert signal == state["final_rating"] == "Overweight"
+    if structured:
+        assert state["pm_decision"]["rating"] == state["final_rating"]
+        assert state["pm_decision"]["confidence"] == "medium"
+    else:
+        assert state["pm_decision"] is None
     for key in ("market_report", "sentiment_report", "news_report", "fundamentals_report",
-                "investment_plan", "trader_investment_plan", "final_trade_decision"):
+                "investment_plan", "trader_investment_plan", "final_trade_decision", "investor_briefing"):
         assert state[key].strip(), key
     tool_methods = {"get_stock_data", "get_indicators", "get_news", "get_global_news",
                     "get_macro_indicators", "get_prediction_markets", "get_fundamentals",
                     "get_balance_sheet", "get_cashflow", "get_income_statement",
-                    "get_insider_transactions", "ohlcv"}
+                    "get_insider_transactions", "get_analyst_recommendations", "get_live_quote", "get_etf_correlation", "ohlcv"}
     assert offline == tool_methods
     assert [e["rating"] for e in graph.memory_log.load_entries()] == ["Overweight"]
 
@@ -387,3 +392,36 @@ def test_the_memory_step_reads_lessons_as_of_the_trade_date_and_settles_once(tmp
 
     assert asked == ["2026-01-20", "2026-01-20"]
     assert (tmp_path / "log.md").read_text() == log_after_first
+
+
+@pytest.mark.unit
+def test_dashboard_runner_streams_parallel_graph_without_restarting_finished_agents(tmp_path, monkeypatch, offline):
+    import json
+
+    from tradingagents import runner as runner_module
+    from tradingagents.runner import AnalysisRunner, RunnerConfig
+    from tradingagents.runner_events import AgentStatusEvent, DoneEvent, ReportSectionEvent
+
+    graph = _graph(tmp_path, monkeypatch, ScriptedModel(structured=True), checkpoint_enabled=True)
+    monkeypatch.setattr(runner_module, "TradingAgentsGraph", lambda *a, **k: graph)
+    events = []
+    cfg = RunnerConfig(ticker="NVDA", analysis_date=TRADE_DATE,
+                       analysts=["market", "social", "news", "fundamentals"], extra_config=graph.config)
+    runner = AnalysisRunner(cfg, on_event=events.append, save_dir=tmp_path / "reports")
+    state = runner.run()
+
+    statuses, final_report = {}, ""
+    for event in events:
+        if isinstance(event, AgentStatusEvent):
+            assert statuses.get(event.agent) != "completed", f"{event.agent} restarted"
+            statuses[event.agent] = event.status
+        if isinstance(event, ReportSectionEvent):
+            if event.section == "final_trade_decision":
+                final_report = event.content
+            if event.section == "investor_briefing":
+                assert final_report == state["final_trade_decision"]
+    assert next(e for e in events if isinstance(e, DoneEvent)).decision == "Overweight"
+    assert json.loads((runner.save_path / "5_portfolio/decision.json").read_text())["rating"] == "Overweight"
+    assert (runner.save_path / "0_summary/briefing.md").read_text() == state["investor_briefing"]
+    assert graph._checkpointer_ctx is None
+    assert len(graph.memory_log.load_entries()) == 1

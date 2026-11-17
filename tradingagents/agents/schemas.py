@@ -18,7 +18,7 @@ so that:
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -31,9 +31,31 @@ _NULLISH_FLOAT = {"", "none", "n/a", "na", "null", "nil", "-", "tbd", "unknown"}
 
 
 def _coerce_optional_float(value):
-    if isinstance(value, str) and value.strip().lower() in _NULLISH_FLOAT:
+    """Normalise an LLM-written optional numeric field before validation.
+
+    Three shapes show up in practice: a placeholder string ("None", "N/A") in
+    place of an omitted value (#1058); a percentage where a price was asked for
+    ("15%", #1288); and a human-formatted price ("$1,234.50"). A percentage
+    cannot be salvaged into an absolute level -- reading "15%" as 15 would put a
+    stop at $15 on a $600 stock -- so it is dropped like a placeholder, leaving
+    one bad field to null out instead of failing the whole proposal. A formatted
+    price is reduced to its number.
+
+    Anything that is not a single number is dropped the same way. A range
+    ("150-160") or a hedge ("around 150") would otherwise reach pydantic, fail
+    validation, and discard the whole decision, losing every field the model got
+    right along with the price.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.lower() in _NULLISH_FLOAT or text.endswith("%"):
         return None
-    return value
+    cleaned = text.replace(",", "").lstrip("$€£¥").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -41,7 +63,7 @@ def _coerce_optional_float(value):
 # ---------------------------------------------------------------------------
 
 
-class PortfolioRating(str, Enum):
+class PortfolioRating(StrEnum):
     """5-tier rating used by the Research Manager and Portfolio Manager."""
 
     BUY = "Buy"
@@ -51,9 +73,6 @@ class PortfolioRating(str, Enum):
     SELL = "Sell"
 
 
-# Shared by ResearchPlan.recommendation and PortfolioDecision.rating so the two
-# stages can't drift apart. Without explicit bars for the outer tiers, a
-# one-sided "avoid Hold" nudge collapses the whole scale into Overweight.
 RATING_BAR_GUIDANCE = (
     "Exactly one of Buy / Overweight / Hold / Underweight / Sell. "
     "Buy and Sell are conviction calls: reserve them for cases where the winning "
@@ -66,7 +85,7 @@ RATING_BAR_GUIDANCE = (
 )
 
 
-class TraderAction(str, Enum):
+class TraderAction(StrEnum):
     """3-tier transaction direction used by the Trader.
 
     The Trader's job is to translate the Research Manager's investment plan
@@ -95,7 +114,13 @@ class ResearchPlan(BaseModel):
     """
 
     recommendation: PortfolioRating = Field(
-        description="The investment recommendation. " + RATING_BAR_GUIDANCE,
+        description=(
+            "The investment recommendation. Exactly one of Buy / Overweight / "
+            "Hold / Underweight / Sell. Conflicting arguments alone are not a "
+            "reason to Hold: commit to the stronger side, sized by how "
+            "decisively it wins. Choose Hold only when the evidence is still "
+            "balanced after weighing, or too thin to support a call."
+        ),
     )
     rationale: str = Field(
         description=(
@@ -107,7 +132,9 @@ class ResearchPlan(BaseModel):
     strategic_actions: str = Field(
         description=(
             "Concrete steps for the trader to implement the recommendation, "
-            "including position sizing guidance consistent with the rating."
+            "including sizing guidance relative to a standard allocation. The "
+            "research team does not see the caller's holdings; the trader and "
+            "portfolio manager apply the actual position."
         ),
     )
 
@@ -148,11 +175,19 @@ class TraderProposal(BaseModel):
     )
     entry_price: float | None = Field(
         default=None,
-        description="Optional entry price target in the instrument's quote currency.",
+        description=(
+            "Optional entry price target as an absolute number in the instrument's "
+            "quote currency (e.g. 189.5), never a percentage or a range. Omit it "
+            "if you cannot state a specific level."
+        ),
     )
     stop_loss: float | None = Field(
         default=None,
-        description="Optional stop-loss price in the instrument's quote currency.",
+        description=(
+            "Optional stop-loss as an absolute price in the instrument's quote "
+            "currency (e.g. 172.0), never a percentage. Convert a percentage "
+            "distance to the price level it implies, or omit it."
+        ),
     )
     position_sizing: str | None = Field(
         default=None,
@@ -177,12 +212,12 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
         "",
         f"**Reasoning**: {proposal.reasoning}",
     ]
-    if proposal.entry_price is not None:
-        parts.extend(["", f"**Entry Price**: {proposal.entry_price}"])
-    if proposal.stop_loss is not None:
-        parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
-    if proposal.position_sizing:
-        parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
+    # Named even when absent, so a reader can tell a level the trader chose not
+    # to give from one the schema never asked for.
+    for label, value in (("Entry Price", proposal.entry_price),
+                         ("Stop Loss", proposal.stop_loss),
+                         ("Position Sizing", proposal.position_sizing)):
+        parts.extend(["", f"**{label}**: {value if value is not None and value != '' else 'not provided'}"])
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
@@ -205,14 +240,13 @@ class PortfolioDecision(BaseModel):
     """
 
     rating: PortfolioRating = Field(
-        description="The final position rating. " + RATING_BAR_GUIDANCE,
-    )
-    confidence: Literal["low", "medium", "high"] = Field(
-        default="medium",
         description=(
-            "Confidence in this rating given the strength of the evidence and how "
-            "much the risk analysts agreed. Use 'low' when the debate was unresolved "
-            "or evidence was thin, 'high' when the case is strong and corroborated."
+            "The final position rating. Exactly one of Buy / Overweight / Hold / "
+            "Underweight / Sell, picked based on the analysts' debate. "
+            "Conflicting arguments alone are not a reason to Hold: commit to the "
+            "stronger side, sized by how decisively it wins. Choose Hold only "
+            "when the evidence is still balanced after weighing, or too thin to "
+            "support a call."
         ),
     )
     executive_summary: str = Field(
@@ -236,6 +270,16 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+
+    confidence: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        description=(
+            "Confidence in this rating given the strength of the evidence and how "
+            "much the risk analysts agreed. Use 'low' when the debate was unresolved "
+            "or evidence was thin, 'high' when the case is strong and corroborated."
+        ),
+    )
+
     what_would_change_it: str = Field(
         default="",
         description=(
@@ -275,10 +319,11 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         "",
         f"**Investment Thesis**: {decision.investment_thesis}",
     ]
-    if decision.price_target is not None:
-        parts.extend(["", f"**Price Target**: {decision.price_target}"])
-    if decision.time_horizon:
-        parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    # Named even when absent: a missing line reads as a field nobody asked for,
+    # so a reader cannot tell "no target" from "target not reported".
+    target = decision.price_target if decision.price_target is not None else "not provided"
+    parts.extend(["", f"**Price Target**: {target}"])
+    parts.extend(["", f"**Time Horizon**: {decision.time_horizon or 'not provided'}"])
     if decision.what_would_change_it:
         parts.extend(["", f"**What Would Change It**: {decision.what_would_change_it}"])
     return "\n".join(parts)
@@ -289,7 +334,7 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
 # ---------------------------------------------------------------------------
 
 
-class SentimentBand(str, Enum):
+class SentimentBand(StrEnum):
     """Discrete sentiment direction produced by the Sentiment Analyst.
 
     Six tiers keep the signal granular enough to be actionable while remaining

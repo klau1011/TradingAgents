@@ -6,9 +6,8 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from tradingagents.dataflows import interface
-from tradingagents.dataflows import y_finance_etf
-
+from tradingagents.dataflows import router as interface
+from tradingagents.dataflows.vendors.yahoo import etf as y_finance_etf
 
 # ---------------------------------------------------------------------------
 # Routing / category registration
@@ -51,53 +50,26 @@ def test_route_to_vendor_dispatches_etf_method(monkeypatch: pytest.MonkeyPatch) 
 # ---------------------------------------------------------------------------
 
 
-def test_detect_instrument_kind_etf() -> None:
-    from tradingagents.agents.utils import agent_utils
-
-    fake_ticker = MagicMock()
-    fake_ticker.info = {"quoteType": "ETF", "longName": "Test ETF", "category": "Large Blend"}
-    with patch("yfinance.Ticker", return_value=fake_ticker):
-        kind, info = agent_utils.detect_instrument_kind("XYZ")
-    assert kind == "etf"
-    assert info["category"] == "Large Blend"
-
-
-def test_detect_instrument_kind_equity() -> None:
-    from tradingagents.agents.utils import agent_utils
-
-    fake_ticker = MagicMock()
-    fake_ticker.info = {"quoteType": "EQUITY"}
-    with patch("yfinance.Ticker", return_value=fake_ticker):
-        kind, _ = agent_utils.detect_instrument_kind("AAPL")
-    assert kind == "equity"
-
-
-def test_detect_instrument_kind_failure_returns_unknown() -> None:
-    from tradingagents.agents.utils import agent_utils
-
-    with patch("yfinance.Ticker", side_effect=RuntimeError("network down")):
-        kind, info = agent_utils.detect_instrument_kind("???")
-    assert kind == "unknown"
-    assert info == {}
-
-
 def test_build_instrument_context_includes_etf_marker() -> None:
-    from tradingagents.agents.utils import agent_utils
-
-    fake_ticker = MagicMock()
-    fake_ticker.info = {
-        "quoteType": "ETF",
-        "longName": "SPDR S&P 500",
-        "category": "Large Blend",
-        "totalAssets": 650_000_000_000,
-        "netExpenseRatio": 0.0945,
-    }
-    with patch("yfinance.Ticker", return_value=fake_ticker):
-        ctx = agent_utils.build_instrument_context("SPY")
+    from tradingagents.agents.context import build_instrument_context
+    ctx = build_instrument_context("SPY", identity={
+        "quote_type": "ETF", "company_name": "SPDR S&P 500", "category": "Large Blend",
+        "total_assets": 650_000_000_000, "expense_ratio": 0.0945,
+    })
     assert "ETF" in ctx
     assert "Large Blend" in ctx
     assert "expense ratio" in ctx
-    assert "0.09%" in ctx  # already in percent units
+    assert "0.0945%" in ctx
+
+
+def test_historical_etf_context_hides_current_metrics() -> None:
+    from tradingagents.agents.context import build_instrument_context
+    ctx = build_instrument_context("SPY", identity={
+        "quote_type": "ETF", "category": "Large Blend", "expense_ratio": 0.0945,
+    }, trade_date="2020-01-01")
+    assert "is an ETF" in ctx
+    assert "Large Blend" not in ctx
+    assert "0.0945%" not in ctx
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +103,7 @@ def test_fundamentals_analyst_uses_etf_tools_for_etf() -> None:
         node({
             "trade_date": "2026-04-22",
             "company_of_interest": "SPY",
+            "instrument_context": "SPY is an ETF",
             "messages": [],
         })
 
@@ -223,3 +196,47 @@ def test_get_etf_correlation_reports_short_history(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(y_finance_etf, "load_ohlcv", lambda *_a, **_k: df.copy())
     out = y_finance_etf.get_etf_correlation("AAA", "BBB", "2024-06-30", 252)
     assert "need at least 30" in out
+
+
+@pytest.mark.parametrize("tool", [
+    y_finance_etf.get_etf_profile,
+    y_finance_etf.get_etf_holdings,
+    y_finance_etf.get_etf_sector_weights,
+])
+def test_etf_current_snapshot_is_withheld_for_historical_run(monkeypatch, tool):
+    def unexpected_request(*args, **kwargs):
+        raise AssertionError("historical snapshot must not fetch current data")
+    monkeypatch.setattr(y_finance_etf.yf, "Ticker", unexpected_request)
+    result = tool("SPY", curr_date="2020-01-01")
+    assert "withheld" in result.lower() or "unavailable" in result.lower()
+
+
+def test_market_only_analysis_can_compare_an_etf_to_its_benchmark(monkeypatch):
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableLambda
+
+    from tradingagents.agents import tools
+    from tradingagents.agents.analysts import market_analyst
+    from tradingagents.graph.analyst_execution import build_analyst_execution_plan
+
+    bound = []
+
+    class FakeLLM:
+        def bind_tools(self, offered):
+            bound.extend(offered)
+            return RunnableLambda(lambda _: AIMessage(content="ETF market report"))
+
+    market_analyst.create_market_analyst(FakeLLM())({
+        "company_of_interest": "SPY", "trade_date": "2020-01-03",
+        "instrument_context": "SPY is an ETF", "messages": [],
+    })
+    spec = build_analyst_execution_plan(["market"]).specs[0]
+    assert tools.get_etf_correlation in bound
+    assert tools.get_etf_correlation in spec.tools
+
+    routed = []
+    monkeypatch.setattr(tools, "route_to_vendor", lambda *args: routed.append(args) or "correlation")
+    assert tools.get_etf_correlation.func(
+        "SPY", benchmark="QQQ", curr_date="2030-01-01", trade_date="2020-01-03"
+    ) == "correlation"
+    assert routed == [("get_etf_correlation", "SPY", "QQQ", "2020-01-03", 252)]

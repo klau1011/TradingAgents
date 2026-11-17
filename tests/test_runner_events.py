@@ -6,6 +6,7 @@ chunks, so this runs without any LLM call or network access.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -27,7 +28,7 @@ class _StubPropagator:
         return {}
 
     def get_graph_args(self, **kwargs) -> dict[str, Any]:
-        return {}
+        return {"config": {}}
 
 
 class _StubInnerGraph:
@@ -38,7 +39,36 @@ class _StubInnerGraph:
         yield from self._chunks
 
 
-class _StubGraph:
+class _RunnerGraphAPI:
+    @contextmanager
+    def checkpoint_scope(self, *args):
+        self.checkpoint_open = True
+        try:
+            yield "test-thread"
+        finally:
+            self.checkpoint_open = False
+
+    def create_run_state(self, *args):
+        return {}
+
+    def checkpoint_input(self, state):
+        return state
+
+    def stream_run(self, state, **args):
+        for chunk in self.graph.stream(state, **args):
+            yield chunk.get("messages", []), chunk
+
+    def record_decision(self, *args):
+        self.recorded = args[-1]
+
+    def clear_checkpoint_on_success(self, *args):
+        self.cleared = True
+
+    def save_reports(self, state, ticker, path):
+        return runner_mod.save_report_to_disk(state, ticker, path)
+
+
+class _StubGraph(_RunnerGraphAPI):
     """Stand-in for TradingAgentsGraph."""
 
     def __init__(self, *_, **__):
@@ -71,7 +101,7 @@ _FAKE_CHUNKS: list[dict[str, Any]] = [
             "neutral_history": "neu",
             "judge_decision": "PM says BUY",
         },
-        "final_trade_decision": "BUY",
+        "final_trade_decision": "Rating: Buy\nPM says BUY",
     },
 ]
 
@@ -122,7 +152,7 @@ def test_runner_emits_expected_event_sequence(tmp_path: Path) -> None:
     # Done event carries the decision, a report path, and the opaque folder
     # reference the web UI links to
     done = [e for e in events if isinstance(e, DoneEvent)]
-    assert done and done[-1].decision == "BUY"
+    assert done and done[-1].decision == "Buy"
     assert done[-1].report_folder == runner.save_path.name
     report = runner.save_path / "complete_report.md"
     assert report.exists()
@@ -141,7 +171,7 @@ def test_runner_error_event_is_sanitized(tmp_path: Path) -> None:
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
-    class _BoomGraph:
+    class _BoomGraph(_RunnerGraphAPI):
         def __init__(self, *_, **__):
             self.propagator = _StubPropagator()
             self.graph = _BoomInner()
@@ -294,7 +324,7 @@ def test_runner_cancels_mid_stream_between_chunks(tmp_path: Path) -> None:
                     cancel_event.set()
                 yield {"messages": [], "market_report": f"chunk {i}"}
 
-    class _LongGraph:
+    class _LongGraph(_RunnerGraphAPI):
         def __init__(self, *_, **__):
             self.propagator = _StubPropagator()
             self.graph = _LongInner()
@@ -374,3 +404,98 @@ def test_runner_activates_ohlcv_cache_during_streaming(tmp_path: Path) -> None:
     )
     # And the cache must be torn down after the run (no leak across runs).
     assert cache_get(("probe",)) is None
+
+
+def test_parallel_analysts_remain_active_until_their_reports(tmp_path):
+    cfg = RunnerConfig(ticker="TEST", analysis_date="2025-01-02", analysts=["market", "news"])
+    runner = AnalysisRunner(cfg, save_dir=tmp_path)
+    runner._process_chunk({"messages": []})
+    assert runner._agent_status["Market Analyst"] == "in_progress"
+    assert runner._agent_status["News Analyst"] == "in_progress"
+    runner._process_chunk({"market_report": "filed"})
+    assert runner._agent_status["Market Analyst"] == "completed"
+    assert runner._agent_status["News Analyst"] == "in_progress"
+
+
+def test_portfolio_report_streams_without_legacy_judge_field(tmp_path):
+    cfg = RunnerConfig(ticker="TEST", analysis_date="2025-01-02", analysts=["market"])
+    runner = AnalysisRunner(cfg, save_dir=tmp_path)
+    runner._process_chunk({"risk_debate_state": {"history": "debate"},
+                           "final_trade_decision": "Rating: Sell"})
+    assert "Rating: Sell" in runner._report_sections["final_trade_decision"]
+    assert runner._agent_status["Portfolio Manager"] == "completed"
+    assert runner._agent_status["Investor Briefing"] == "in_progress"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_runner_closes_stream_and_checkpoint_and_records_only_success(tmp_path, cancel):
+    import threading
+
+    from tradingagents.runner import RunCancelled
+
+    cancel_event = threading.Event()
+    instances = []
+
+    class LifecycleGraph(_StubGraph):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            instances.append(self)
+            self.closed = False
+            self.recorded = None
+            self.cleared = False
+
+        def stream_run(self, state, **args):
+            assert args["config"]["configurable"]["thread_id"] == "test-thread"
+            try:
+                if cancel:
+                    cancel_event.set()
+                # Typed final_rating is authoritative, even when prose quotes Buy.
+                yield [], {"final_trade_decision": "Rating: Buy", "final_rating": "Underweight"}
+            finally:
+                self.closed = True
+
+    events = []
+    cfg = RunnerConfig(ticker="TEST", analysis_date="2025-01-02", analysts=["market"])
+    with patch.object(runner_mod, "TradingAgentsGraph", LifecycleGraph):
+        runner = AnalysisRunner(cfg, on_event=events.append, save_dir=tmp_path, cancel_event=cancel_event)
+        if cancel:
+            with pytest.raises(RunCancelled):
+                runner.run()
+        else:
+            runner.run()
+    graph = instances[0]
+    assert graph.closed and not graph.checkpoint_open
+    assert graph.cleared is (not cancel)
+    assert (graph.recorded is not None) is (not cancel)
+    if not cancel:
+        assert next(e for e in events if isinstance(e, DoneEvent)).decision == "Underweight"
+
+
+def test_research_manager_plan_streams_without_legacy_judge_field(tmp_path):
+    cfg = RunnerConfig(ticker="TEST", analysis_date="2025-01-02", analysts=["market"])
+    runner = AnalysisRunner(cfg, save_dir=tmp_path)
+    runner._process_chunk({"investment_debate_state": {"history": "debate"},
+                           "investment_plan": "Rating: Overweight"})
+    assert "Rating: Overweight" in runner._report_sections["investment_plan"]
+    assert runner._agent_status["Research Manager"] == "completed"
+    assert runner._agent_status["Trader"] == "in_progress"
+
+
+def test_cumulative_states_do_not_restart_agents_or_replace_finished_reports(tmp_path):
+    events = []
+    cfg = RunnerConfig(ticker="TEST", analysis_date="2025-01-02", analysts=["market"])
+    runner = AnalysisRunner(cfg, on_event=events.append, save_dir=tmp_path)
+    state = {"messages": []}
+    for chunk in [*_FAKE_CHUNKS,
+                  {"investment_plan": "Rating: Overweight\nResearch decision"},
+                  {"investor_briefing": "Plain-language summary"},
+                  {}]:
+        state.update(chunk)
+        runner._process_chunk(state)
+    last = {}
+    for event in events:
+        if isinstance(event, AgentStatusEvent):
+            assert last.get(event.agent) != "completed", f"{event.agent} restarted"
+            last[event.agent] = event.status
+    assert runner._report_sections["final_trade_decision"] == state["final_trade_decision"]
+    assert "Research decision" in runner._report_sections["investment_plan"]

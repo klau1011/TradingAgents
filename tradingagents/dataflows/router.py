@@ -26,12 +26,20 @@ from tradingagents.dataflows.vendors.sec_edgar import (
     get_cashflow as get_sec_edgar_cashflow,
     get_income_statement as get_sec_edgar_income_statement,
 )
+from tradingagents.dataflows.vendors.yahoo.etf import (
+    get_etf_correlation,
+    get_etf_holdings,
+    get_etf_profile,
+    get_etf_sector_weights,
+)
 from tradingagents.dataflows.vendors.yahoo.fundamentals import (
+    get_analyst_recommendations,
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
     get_fundamentals as get_yfinance_fundamentals,
     get_income_statement as get_yfinance_income_statement,
     get_insider_transactions as get_yfinance_insider_transactions,
+    get_live_quote,
 )
 from tradingagents.dataflows.vendors.yahoo.market import (
     get_stock_stats_indicators_window,
@@ -46,7 +54,7 @@ TOOLS_CATEGORIES = {
     "core_stock_apis": {
         "description": "OHLCV stock price data",
         "tools": [
-            "get_stock_data"
+            "get_stock_data", "get_live_quote"
         ]
     },
     "technical_indicators": {
@@ -61,7 +69,7 @@ TOOLS_CATEGORIES = {
             "get_fundamentals",
             "get_balance_sheet",
             "get_cashflow",
-            "get_income_statement"
+            "get_income_statement", "get_analyst_recommendations"
         ]
     },
     "news_data": {
@@ -71,6 +79,10 @@ TOOLS_CATEGORIES = {
             "get_global_news",
             "get_insider_transactions",
         ]
+    },
+    "etf_data": {
+        "description": "ETF profile, holdings, sectors and benchmark correlation",
+        "tools": ["get_etf_profile", "get_etf_holdings", "get_etf_sector_weights", "get_etf_correlation"],
     },
     "macro_data": {
         "description": "Macroeconomic indicators (rates, inflation, labor, growth)",
@@ -95,6 +107,12 @@ OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
+    "get_live_quote": {"yfinance": get_live_quote},
+    "get_analyst_recommendations": {"yfinance": get_analyst_recommendations},
+    "get_etf_profile": {"yfinance": get_etf_profile},
+    "get_etf_holdings": {"yfinance": get_etf_holdings},
+    "get_etf_sector_weights": {"yfinance": get_etf_sector_weights},
+    "get_etf_correlation": {"yfinance": get_etf_correlation},
     # core_stock_apis
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,

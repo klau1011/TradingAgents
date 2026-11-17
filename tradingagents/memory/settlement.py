@@ -2,6 +2,7 @@
 it against its benchmark and record a reflection on it in the memory log."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -133,7 +134,10 @@ class Settlement:
     failed: list[tuple[str, str, str]] = field(default_factory=list)    # (ticker, date, reason)
 
 
-def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool = True) -> Settlement:
+def settle_pending(
+    ticker: str, memory_log, reflector, config: dict, wait: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> Settlement:
     """Settle ``ticker``'s pending decisions whose holding window has traded.
 
     One pass at a time per log (``memory_log.settling()``), so runs sharing a log
@@ -142,8 +146,11 @@ def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool 
     Entries whose window has not traded yet are skipped; an entry whose prices
     or reflection could not be had stays pending and is reported as failed.
     With ``wait=False`` a pass already running elsewhere is left to do the work.
+    ``should_stop`` cancels between calls; a completed reflection is still saved.
     """
     result = Settlement()
+    if should_stop and should_stop():
+        return result
     with memory_log.settling(wait=wait) as held:
         if not held:
             return result
@@ -152,6 +159,8 @@ def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool 
             return result
         benchmark = resolve_benchmark(ticker, config)
         for entry in pending:
+            if should_stop and should_stop():
+                break
             try:
                 raw, alpha, days, resolution_date = fetch_returns(
                     ticker, entry["date"], config.get("holding_period_days", 5), benchmark=benchmark,
@@ -162,6 +171,8 @@ def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool 
                 continue
             if raw is None:
                 continue  # the holding window has not traded yet: try again next run
+            if should_stop and should_stop():
+                break
             try:
                 reflection = reflector.reflect_on_final_decision(
                     final_decision=entry.get("decision", ""),
@@ -182,7 +193,10 @@ def settle_pending(ticker: str, memory_log, reflector, config: dict, wait: bool 
     return result
 
 
-def settle_all_pending(memory_log, reflector, config: dict, wait: bool = True) -> Settlement:
+def settle_all_pending(
+    memory_log, reflector, config: dict, wait: bool = True,
+    should_stop: Callable[[], bool] | None = None,
+) -> Settlement:
     """Settle every ticker's pending decisions whose holding window has traded (#1445).
 
     A run settles its own ticker; a ticker no longer analysed would otherwise
@@ -190,7 +204,10 @@ def settle_all_pending(memory_log, reflector, config: dict, wait: bool = True) -
     """
     result = Settlement()
     for ticker in dict.fromkeys(e["ticker"] for e in memory_log.get_pending_entries()):
-        done = settle_pending(ticker, memory_log, reflector, config, wait=wait)
+        if should_stop and should_stop():
+            break
+        done = settle_pending(ticker, memory_log, reflector, config, wait=wait,
+                              should_stop=should_stop)
         result.settled.extend(done.settled)
         result.failed.extend(done.failed)
     return result

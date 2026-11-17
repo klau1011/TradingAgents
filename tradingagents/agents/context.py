@@ -97,10 +97,15 @@ def _identity(ticker: str) -> dict:
         ("industry", "industry"),
         ("exchange", "exchange"),
         ("quoteType", "quote_type"),
+        ("category", "category"),
     ):
         value = _clean_identity_value(info.get(source_key))
         if value:
             identity[target_key] = value
+    for source, target in (("totalAssets", "total_assets"), ("netExpenseRatio", "expense_ratio"),
+                           ("annualReportExpenseRatio", "expense_ratio")):
+        if info.get(source) is not None and target not in identity:
+            identity[target] = info[source]
     return identity
 
 
@@ -166,6 +171,18 @@ def build_instrument_context(
             " Treat it as a crypto asset rather than a company, and do not "
             "assume company fundamentals are available."
         )
+    if str(identity.get("quote_type", "")).upper() == "ETF":
+        context += (f"\n\nIMPORTANT: `{ticker}` is an ETF. Treat it as a basket, not an operating company: "
+                    "focus on holdings concentration, sector exposure, expense ratio, distribution yield, "
+                    "NAV premium/discount, and benchmark correlation. Use ETF-specific tools; "
+                    "single-company financial statements and insider transactions do not apply.")
+        if not is_historical(trade_date):
+            if identity.get("category"):
+                context += f" Category: {identity['category']}."
+            if identity.get("expense_ratio") is not None:
+                context += f" Current expense ratio: {identity['expense_ratio']}%."
+            if identity.get("total_assets") is not None:
+                context += f" Current AUM: {identity['total_assets']}."
     return context
 
 
@@ -215,4 +232,15 @@ def get_portfolio_context_from_state(state: Mapping[str, Any]) -> str:
         "Portfolio context: not provided. You do not know the caller's current "
         "holdings or cash, so do not assume a flat book; give direction and "
         "sizing guidance in terms the caller can apply to their own position."
+    )
+
+
+def get_analyst_reports_from_state(state: Mapping[str, Any]) -> str:
+    """The original analyst evidence for the decision-making agents."""
+    return "\n\n".join(
+        f"{label}:\n{report_or_absent(state.get(key, ''), label)}"
+        for key, label in (("market_report", "Market Research Report"),
+                           ("sentiment_report", "Social Media Sentiment Report"),
+                           ("news_report", "Latest World Affairs Report"),
+                           ("fundamentals_report", "Company Fundamentals Report"))
     )

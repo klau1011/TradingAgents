@@ -8,11 +8,87 @@ from dateutil.relativedelta import relativedelta
 from stockstats import wrap
 
 from tradingagents.dataflows.errors import NoMarketDataError, VendorError
+from tradingagents.dataflows.ohlcv_cache import cache_get, cache_put
 from tradingagents.dataflows.symbols import normalize_symbol
 from tradingagents.dataflows.vendors.yahoo.common import price_text, raise_for_empty, yf_retry
 from tradingagents.dataflows.vendors.yahoo.ohlcv import _assert_ohlcv_not_stale, load_ohlcv
 
 logger = logging.getLogger(__name__)
+
+_VOLUME_WINDOW = 20
+_INDICATOR_ALIASES = {
+    "relative_volume": "rvol",
+    "rel_volume": "rvol",
+    "volume_z_score": "volume_zscore",
+    "vol_zscore": "volume_zscore",
+    "volume_slope": "volume_trend_slope",
+    "vol_slope": "volume_trend_slope",
+}
+_CUSTOM_VOLUME_INDICATORS = {
+    "rvol",
+    "volume_zscore",
+    "volume_trend_slope",
+}
+
+
+def _normalize_indicator_name(indicator: str) -> str:
+    """Normalize aliases so users can request indicators with common variants."""
+    normalized = str(indicator).strip().lower()
+    return _INDICATOR_ALIASES.get(normalized, normalized)
+
+
+def _compute_rvol(volume: pd.Series, window: int = _VOLUME_WINDOW) -> pd.Series:
+    rolling_mean = volume.rolling(window=window, min_periods=window).mean()
+    return volume / rolling_mean.replace(0, pd.NA)
+
+
+def _compute_volume_zscore(volume: pd.Series, window: int = _VOLUME_WINDOW) -> pd.Series:
+    rolling_mean = volume.rolling(window=window, min_periods=window).mean()
+    rolling_std = volume.rolling(window=window, min_periods=window).std()
+    return (volume - rolling_mean) / rolling_std.replace(0, pd.NA)
+
+
+def _compute_volume_trend_slope(volume: pd.Series, window: int = _VOLUME_WINDOW) -> pd.Series:
+    n = window
+    sum_x = n * (n - 1) / 2
+    sum_x2 = (n - 1) * n * (2 * n - 1) / 6
+    denominator = n * sum_x2 - (sum_x ** 2)
+
+    def slope_ratio(values) -> float:
+        if len(values) != n:
+            return float("nan")
+        sum_y = float(sum(values))
+        mean_y = sum_y / n
+        if mean_y == 0:
+            return float("nan")
+
+        sum_xy = 0.0
+        for i, value in enumerate(values):
+            sum_xy += i * float(value)
+
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        return slope / mean_y
+
+    return volume.rolling(window=window, min_periods=window).apply(
+        slope_ratio,
+        raw=True,
+    )
+
+
+def _compute_custom_volume_indicator(data: pd.DataFrame, indicator: str) -> pd.Series:
+    """Compute non-stockstats volume indicators from OHLCV data."""
+    volume = pd.to_numeric(data["Volume"], errors="coerce")
+
+    if indicator == "rvol":
+        return _compute_rvol(volume)
+    if indicator == "volume_zscore":
+        return _compute_volume_zscore(volume)
+    if indicator == "volume_trend_slope":
+        return _compute_volume_trend_slope(volume)
+
+    raise ValueError(f"Unsupported custom indicator: {indicator}")
+
+
 
 
 def get_YFin_data_online(
@@ -26,6 +102,10 @@ def get_YFin_data_online(
 
     # Resolve broker/forex symbols to Yahoo's convention (XAUUSD+ -> GC=F).
     canonical = normalize_symbol(symbol)
+    cache_key = ("yfin_online", canonical, symbol, start_date, end_date)
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     # yfinance treats ``end`` as EXCLUSIVE, so it would drop the requested
     # end_date row (and the current day when end_date is today). Request one day
@@ -60,7 +140,9 @@ def get_YFin_data_online(
     header = f"# Stock data for {label} from {start_date} to {end_date}\n"
     header += f"# Total records: {len(data)}\n\n"
 
-    return header + csv_string
+    result = header + csv_string
+    cache_put(cache_key, result)
+    return result
 
 
 def get_stock_stats_indicators_window(
@@ -72,7 +154,11 @@ def get_stock_stats_indicators_window(
     look_back_days: Annotated[int, "how many days to look back"],
 ) -> str:
 
+    indicator = _normalize_indicator_name(indicator)
     best_ind_params = {
+        "rvol": "Relative volume: volume divided by its 20-session average.",
+        "volume_zscore": "Volume z-score relative to its 20-session mean and standard deviation.",
+        "volume_trend_slope": "20-session volume regression slope divided by average volume.",
         # Moving Averages
         "close_50_sma": (
             "50 SMA: A medium-term trend indicator. "
@@ -214,8 +300,11 @@ def _get_stock_stats_bulk(
     """
     from stockstats import wrap
 
+    indicator = _normalize_indicator_name(indicator)
     data = load_ohlcv(symbol, as_of_date)
     df = wrap(data)
+    if indicator in _CUSTOM_VOLUME_INDICATORS:
+        df[indicator] = _compute_custom_volume_indicator(data, indicator)
     df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
 
     df[indicator]  # This triggers stockstats to calculate the indicator
@@ -279,8 +368,11 @@ def get_stock_stats(
         str, "curr date for retrieving stock price data, YYYY-mm-dd"
     ],
 ):
+    indicator = _normalize_indicator_name(indicator)
     data = load_ohlcv(symbol, as_of_date)
     df = wrap(data)
+    if indicator in _CUSTOM_VOLUME_INDICATORS:
+        df[indicator] = _compute_custom_volume_indicator(data, indicator)
     df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
     as_of_str = pd.to_datetime(as_of_date).strftime("%Y-%m-%d")
 

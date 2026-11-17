@@ -1,5 +1,7 @@
+from datetime import datetime
 from typing import Annotated
 
+import pandas as pd
 import yfinance as yf
 
 from tradingagents.dataflows.date_window import (
@@ -41,6 +43,10 @@ def get_fundamentals(
     info = yf_retry(lambda: yf.Ticker(canonical).info)
     if not info:
         raise_for_empty(ticker, canonical, "fundamentals")
+
+    if str(info.get("quoteType", "")).upper() == "ETF":
+        from tradingagents.dataflows.vendors.yahoo.etf import get_etf_profile
+        return get_etf_profile(canonical, as_of_date)
 
     # Yahoo gives these two in percent (dividendYield 0.41 is 0.41%; debtToEquity
     # 78.4 is 78.4%, a ratio of 0.78) but the margins and returns as fractions,
@@ -169,3 +175,108 @@ def get_insider_transactions(
 def get_company_profile(ticker: str) -> dict:
     """Yahoo's current profile for ``ticker``: name, sector, industry and the like."""
     return yf_retry(lambda: yf.Ticker(normalize_symbol(ticker)).info) or {}
+
+
+def get_analyst_recommendations(
+    ticker: Annotated[str, "ticker symbol of the company"],
+    as_of_date: str | None = None,
+):
+    """Get Wall Street analyst recommendations and price targets from yfinance."""
+    withheld = withhold_live_profile(as_of_date, normalize_symbol(ticker))
+    if withheld:
+        return withheld
+    try:
+        ticker_obj = yf.Ticker(normalize_symbol(ticker))
+        sections = []
+
+        # Price targets
+        try:
+            targets = yf_retry(lambda: ticker_obj.analyst_price_targets)
+            if targets is not None and not (isinstance(targets, pd.DataFrame) and targets.empty):
+                sections.append(f"## Analyst Price Targets for {normalize_symbol(ticker)}")
+                if isinstance(targets, dict):
+                    for k, v in targets.items():
+                        if v is not None:
+                            sections.append(f"{k}: {v}")
+                else:
+                    sections.append(str(targets))
+        except Exception:
+            pass
+
+        # Recommendations summary
+        try:
+            recs = yf_retry(lambda: ticker_obj.recommendations)
+            if recs is not None and not recs.empty:
+                sections.append(f"\n## Recent Analyst Recommendations for {normalize_symbol(ticker)}")
+                sections.append(recs.head(20).to_csv())
+        except Exception:
+            pass
+
+        # Upgrades / downgrades
+        try:
+            upgrades = yf_retry(lambda: ticker_obj.upgrades_downgrades)
+            if upgrades is not None and not upgrades.empty:
+                sections.append(f"\n## Recent Upgrades/Downgrades for {normalize_symbol(ticker)}")
+                sections.append(upgrades.head(20).to_csv())
+        except Exception:
+            pass
+
+        if not sections:
+            return f"No analyst recommendation data found for symbol '{ticker}'"
+
+        header = f"# Analyst Recommendations for {normalize_symbol(ticker)}\n"
+        header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
+        return header + "\n".join(sections)
+
+    except Exception as e:
+        return f"Error retrieving analyst recommendations for {ticker}: {str(e)}"
+
+
+def get_live_quote(
+    ticker: Annotated[str, "ticker symbol of the company"],
+    as_of_date: str | None = None,
+) -> str:
+    """Get a near-real-time quote snapshot (~15 min delayed) from yfinance.
+
+    Returns last price, day range, volume, previous close, and percent change.
+    Useful mid-trading-day when daily OHLCV bars only reflect the open.
+    """
+    withheld = withhold_live_profile(as_of_date, normalize_symbol(ticker))
+    if withheld:
+        return withheld
+    try:
+        t = yf.Ticker(normalize_symbol(ticker))
+        fi = t.fast_info
+
+        last = fi.get("lastPrice")
+        prev_close = fi.get("previousClose")
+        day_high = fi.get("dayHigh")
+        day_low = fi.get("dayLow")
+        last_volume = fi.get("lastVolume")
+        mkt_cap = fi.get("marketCap")
+
+        if last is None:
+            return f"No live quote available for '{ticker}'"
+
+        pct_change = ""
+        if prev_close and prev_close != 0:
+            change = ((last - prev_close) / prev_close) * 100
+            pct_change = f"Change from prev close: {change:+.2f}%\n"
+
+        header = f"# Live Quote Snapshot for {normalize_symbol(ticker)}\n"
+        header += f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (delayed ~15 min)\n\n"
+
+        lines = [
+            f"Last Price: {last:.2f}" if last else None,
+            f"Previous Close: {prev_close:.2f}" if prev_close else None,
+            pct_change.strip() if pct_change else None,
+            f"Day Range: {day_low:.2f} - {day_high:.2f}" if day_low and day_high else None,
+            f"Volume: {last_volume:,.0f}" if last_volume else None,
+            f"Market Cap: {mkt_cap:,.0f}" if mkt_cap else None,
+        ]
+
+        return header + "\n".join(line for line in lines if line)
+
+    except Exception as e:
+        return f"Error retrieving live quote for {ticker}: {str(e)}"

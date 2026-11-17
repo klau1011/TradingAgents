@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from tradingagents.dataflows import y_finance
+from tradingagents.dataflows.vendors.yahoo import market as y_finance
 
 
 def _synthetic_ohlcv(rows: int = 40) -> pd.DataFrame:
@@ -47,7 +47,7 @@ def test_volume_z_score_alias_via_public_indicator_api(monkeypatch: pytest.Monke
     output = y_finance.get_stock_stats_indicators_window(
         symbol="AAPL",
         indicator="volume_z_score",
-        curr_date="2026-02-09",
+        as_of_date="2026-02-09",
         look_back_days=5,
     )
 
@@ -65,7 +65,7 @@ def test_custom_indicator_window_fallback_does_not_emit_blank_values(monkeypatch
     output = y_finance.get_stock_stats_indicators_window(
         symbol="AAPL",
         indicator="rvol",
-        curr_date="2026-02-09",
+        as_of_date="2026-02-09",
         look_back_days=3,
     )
 
@@ -78,3 +78,12 @@ def test_custom_indicator_window_fallback_does_not_emit_blank_values(monkeypatch
     assert date_lines
     for line in date_lines:
         assert line.split(":", 1)[1].strip(), f"expected non-blank indicator value in line: {line}"
+
+
+@pytest.mark.parametrize("indicator", ["rvol", "volume_zscore", "volume_trend_slope"])
+def test_custom_volume_zero_volume_has_no_infinite_values(monkeypatch, indicator):
+    data = _synthetic_ohlcv()
+    data["Volume"] = 0
+    monkeypatch.setattr(y_finance, "load_ohlcv", lambda *_: data.copy())
+    values = y_finance._get_stock_stats_bulk("AAPL", indicator, "2026-02-09")
+    assert set(values.values()) == {"N/A"}

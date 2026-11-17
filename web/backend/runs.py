@@ -51,7 +51,7 @@ class RunRecord:
     status: str = "queued"  # queued | running | done | error | cancelled
     queue_position: int | None = None
     created_at: str = field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc).isoformat()
+        default_factory=lambda: datetime.datetime.now(datetime.UTC).isoformat()
     )
     started_at: str | None = None
     finished_at: str | None = None
@@ -235,7 +235,7 @@ class RunRegistry:
             if record.cancel_event.is_set():
                 record.status = "cancelled"
                 record.finished_at = datetime.datetime.now(
-                    datetime.timezone.utc
+                    datetime.UTC
                 ).isoformat()
                 self._record_event(
                     record,
@@ -252,7 +252,7 @@ class RunRegistry:
 
             record.status = "running"
             record.queue_position = None
-            record.started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            record.started_at = datetime.datetime.now(datetime.UTC).isoformat()
             await self._refresh_queue_positions()
 
             loop = asyncio.get_running_loop()
@@ -284,7 +284,7 @@ class RunRegistry:
                 record.error = f"{type(exc).__name__}: {exc}"
             finally:
                 record.finished_at = datetime.datetime.now(
-                    datetime.timezone.utc
+                    datetime.UTC
                 ).isoformat()
                 # Defense-in-depth: guarantee a terminal StatusEvent reaches
                 # subscribers even if the runner exited without emitting one

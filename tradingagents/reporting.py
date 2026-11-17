@@ -6,6 +6,7 @@ CLI and ``TradingAgentsGraph.save_reports`` both call this, so a headless / API
 run produces the same on-disk report tree a CLI run does.
 """
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -48,6 +49,9 @@ def _header(ticker: str, final_state: dict, settings: dict | None) -> str:
 
 # The report's sections in order: (heading, folder, [(agent, file, state path)]).
 _SECTIONS = (
+    ("0. Investor Briefing", "0_summary", (
+        ("Investor Briefing", "briefing.md", ("investor_briefing",)),
+    )),
     ("I. Analyst Team Reports", "1_analysts", (
         ("Market Analyst", "market.md", ("market_report",)),
         ("Sentiment Analyst", "sentiment.md", ("sentiment_report",)),
@@ -133,4 +137,10 @@ def write_report_tree(final_state: dict, ticker: str, save_path, settings: dict 
         for _agent, filename, _path in agents:
             if (folder, filename) not in current_files:
                 (save_path / folder / filename).unlink(missing_ok=True)
+    decision_path = save_path / "5_portfolio" / "decision.json"
+    if final_state.get("pm_decision") is not None:
+        decision_path.parent.mkdir(exist_ok=True)
+        decision_path.write_text(json.dumps(final_state["pm_decision"], indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
+        decision_path.unlink(missing_ok=True)
     return save_path / "complete_report.md"

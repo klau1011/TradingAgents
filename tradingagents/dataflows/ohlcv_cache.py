@@ -22,9 +22,10 @@ ad-hoc usage of the data-fetching helpers.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator, Optional, Tuple
+from typing import Any
 
 import pandas as pd
 
@@ -32,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Cache key shape: tuple of strings. Helpers build them so call sites stay
 # compact. ``None`` sentinel means "no active cache".
-CacheKey = Tuple[str, ...]
-_cache_var: ContextVar[Optional[dict]] = ContextVar("ohlcv_cache", default=None)
+CacheKey = tuple[str, ...]
+_cache_var: ContextVar[dict | None] = ContextVar("ohlcv_cache", default=None)
 
 
 @contextmanager
@@ -47,7 +48,7 @@ def start_run_cache() -> Iterator[dict]:
         _cache_var.reset(token)
 
 
-def cache_get(key: CacheKey) -> Optional[Any]:
+def cache_get(key: CacheKey) -> Any | None:
     """Return the cached value (a copy when it's a DataFrame) or ``None``."""
     cache = _cache_var.get()
     if cache is None:

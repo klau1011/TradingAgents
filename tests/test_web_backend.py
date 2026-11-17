@@ -202,9 +202,9 @@ def test_cancel_running_run_emits_cancelled_status(monkeypatch) -> None:
     """
     import time
 
-    from web.backend.app import app
-    from web.backend import runs as runs_mod
     from tradingagents.runner import RunCancelled
+    from web.backend import runs as runs_mod
+    from web.backend.app import app
 
     def fake_run(self):
         # Long enough that we definitely cancel mid-flight, while polling the
@@ -268,8 +268,8 @@ def test_cancel_terminal_run_returns_terminal_status(monkeypatch) -> None:
     does not transition anything."""
     import time
 
-    from web.backend.app import app
     from web.backend import runs as runs_mod
+    from web.backend.app import app
 
     monkeypatch.setattr(
         runs_mod.AnalysisRunner,

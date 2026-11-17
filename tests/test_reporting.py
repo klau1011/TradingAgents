@@ -173,3 +173,18 @@ def test_the_header_names_the_analysts_as_users_select_them(tmp_path):
     page = (tmp_path / "complete_report.html").read_text(encoding="utf-8")
     fields = re.findall(r'<span class="field">([^<]*)</span>', page)
     assert {"market", "sentiment", "news"} <= set(fields) and "social" not in page
+
+
+@pytest.mark.unit
+def test_report_preserves_fork_briefing_and_structured_decision_then_removes_stale_files(tmp_path):
+    import json
+
+    state = dict(_state(), investor_briefing="A plain-language summary",
+                 pm_decision={"rating": "Buy", "confidence": "high"})
+    report = write_report_tree(state, "AAPL", tmp_path)
+    assert (tmp_path / "0_summary/briefing.md").read_text() == state["investor_briefing"]
+    assert "A plain-language summary" in report.read_text()
+    assert json.loads((tmp_path / "5_portfolio/decision.json").read_text()) == state["pm_decision"]
+    write_report_tree(_state(), "AAPL", tmp_path)
+    assert not (tmp_path / "0_summary/briefing.md").exists()
+    assert not (tmp_path / "5_portfolio/decision.json").exists()

@@ -42,7 +42,6 @@ bedrock = [
     "langchain-aws>=1.7.9",
 ]
 
-[project.optional-dependencies]
 web = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",

@@ -1,393 +1,366 @@
-"""Tests for the evaluation/backtest harness.
+"""Backtesting: many single-shot decisions, scored by the memory log.
 
-The metric math is pure (no LLM, no network) and is exercised here with
-hand-computed known answers. The per-point LLM run is injected so the
-orchestration (date sampling, resume-skip) is testable without API calls.
+A run already records its rating and later settles it with realized and alpha
+return against the regional benchmark. A backtest is that machinery over a grid
+of tickers and dates, aggregated. It evaluates decision quality; it does not
+simulate a portfolio, so there is no execution, no fees and no equity curve.
 """
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
-from tradingagents import backtest
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
+from tradingagents.backtest import iter_grid, run_backtest, summarize
+from tradingagents.memory import TradingMemoryLog
+from tradingagents.memory.settlement import Settlement
+
+DECISION = "Rating: Buy\n\nbuy it"
 
 
-def _row(ticker, date, rating, confidence, alpha, holding=5, raw=None):
-    """Build a result row; raw defaults to alpha when not given."""
-    return {
-        "ticker": ticker,
-        "date": date,
-        "rating": rating,
-        "confidence": confidence,
-        "raw_return": alpha if raw is None else raw,
-        "alpha_return": alpha,
-        "holding_days": holding,
-        "benchmark": "SPY",
-    }
+@pytest.mark.unit
+def test_grid_spacing_and_canonical_dates():
+    assert iter_grid("2026-01-05", "2026-01-20", every_n_days=7) == ["2026-01-05", "2026-01-12", "2026-01-19"]
 
 
-# Known-answer dataset (see hand calculation in the test below).
-SAMPLE_ROWS = [
-    _row("AAPL", "2025-01-02", "Buy", "high", 0.10),
-    _row("AAPL", "2025-02-03", "Buy", "high", -0.04),
-    _row("AAPL", "2025-03-03", "Sell", "high", -0.06),
-    _row("MSFT", "2025-01-02", "Overweight", "medium", 0.02),
-    _row("MSFT", "2025-02-03", "Hold", "low", 0.01),
-    _row("MSFT", "2025-03-03", "Underweight", "low", 0.03),
-    _row("NVDA", "2025-01-02", "Buy", "medium", None),  # unresolved: too recent
-]
+@pytest.mark.unit
+def test_grid_stops_at_today(monkeypatch):
+    import tradingagents.backtest as bt
+
+    monkeypatch.setattr(bt, "get_current_date", lambda: "2026-01-10")
+    assert iter_grid("2026-01-05", "2026-02-20", every_n_days=5) == ["2026-01-05", "2026-01-10"]
 
 
-def test_direction_mapping():
-    assert backtest._direction("Buy") == 1
-    assert backtest._direction("Overweight") == 1
-    assert backtest._direction("Hold") == 0
-    assert backtest._direction("Underweight") == -1
-    assert backtest._direction("Sell") == -1
-    assert backtest._direction("buy") == 1  # case-insensitive
-    assert backtest._direction("garbage") == 0
-    assert backtest._direction(None) == 0
+@pytest.mark.unit
+def test_grid_rejects_a_non_canonical_date():
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        iter_grid("2026-1-5", "2026-01-20")
 
 
-def test_direction_is_shared_with_rating_module():
-    """conditional_logic and backtest must agree on rating direction."""
-    from tradingagents.agents.utils import rating
+class _FakeGraph:
+    """Stands in for TradingAgentsGraph, writing to the log the harness gave it."""
 
-    assert backtest._direction is rating.direction
-    assert rating.RATING_DIRECTION == {
-        "buy": 1, "overweight": 1, "hold": 0, "underweight": -1, "sell": -1,
-    }
+    instances: list = []
+    fail_on: set = set()
 
+    def __init__(self, selected_analysts=None, config=None, **kw):
+        self.analysts = list(selected_analysts) if selected_analysts else None
+        self.config = config
+        self.memory_log = TradingMemoryLog(config)
+        self.calls = []
+        self.settled = []
+        _FakeGraph.instances.append(self)
 
-def test_summary_headline_metrics():
-    s = backtest.summarize(SAMPLE_ROWS)
+    def propagate(self, ticker, trade_date, asset_type="stock", portfolio=None):
+        self.calls.append((ticker, trade_date))
+        if (ticker, trade_date) in _FakeGraph.fail_on:
+            raise RuntimeError("vendor exploded")
+        self.memory_log.store_decision(ticker, trade_date, DECISION)
+        return {"final_trade_decision": DECISION}, "Buy"
 
-    # 7 total, 6 resolved (Hold counts), 5 directional (exclude Hold + unresolved).
-    assert s["n_total"] == 7
-    assert s["n_resolved"] == 6
-    assert s["n_directional"] == 5
-    assert s["coverage"] == pytest.approx(6 / 7)
-
-    # strategy returns s = direction * alpha = [+.10, -.04, +.06, +.02, -.03]
-    # hits (s > 0): T, F, T, T, F -> 3/5
-    assert s["hit_rate"] == pytest.approx(0.6)
-    # mean captured alpha = 0.11 / 5
-    assert s["mean_alpha"] == pytest.approx(0.022)
-
-    # sample std (ddof=1) of strat, then annualize by sqrt(252/5)
-    strat = [0.10, -0.04, 0.06, 0.02, -0.03]
-    mean = sum(strat) / 5
-    sd = math.sqrt(sum((x - mean) ** 2 for x in strat) / 4)
-    expected_sharpe = (mean / sd) * math.sqrt(252 / 5)
-    assert s["signal_sharpe"] == pytest.approx(expected_sharpe, rel=1e-6)
-
-    # cumulative alpha [.10,.06,.12,.14,.11]; worst peak-to-trough = -0.04
-    assert s["max_drawdown"] == pytest.approx(-0.04)
+    def settle_pending(self, ticker):
+        self.settled.append(ticker)
+        return Settlement()
 
 
-def test_max_drawdown_is_chronological_not_ticker_order():
-    """Drawdown must walk dates chronologically (aggregating same-date calls),
-    not the per-ticker input order — otherwise it depends on the order the user
-    passed tickers."""
-    rows_ab = [
-        _row("AAA", "2025-01-02", "Buy", "high", 0.10),
-        _row("AAA", "2025-02-03", "Buy", "high", -0.20),
-        _row("BBB", "2025-01-02", "Buy", "high", 0.05),
-        _row("BBB", "2025-02-03", "Buy", "high", -0.01),
+@pytest.fixture(autouse=True)
+def _fake_graph(monkeypatch, tmp_path):
+    import tradingagents.backtest as bt
+
+    _FakeGraph.instances = []
+    _FakeGraph.fail_on = set()
+    monkeypatch.setattr(bt, "TradingAgentsGraph", _FakeGraph)
+    return _FakeGraph
+
+
+def _config(tmp_path):
+    return {"results_dir": str(tmp_path / "results"),
+            "memory_log_path": str(tmp_path / "live_trading_memory.md")}
+
+
+@pytest.mark.unit
+def test_the_live_memory_log_is_never_written(tmp_path):
+    config = _config(tmp_path)
+    result = run_backtest(["NVDA"], ["2026-01-05", "2026-01-12"], config)
+
+    assert not (tmp_path / "live_trading_memory.md").exists()
+    assert result.log_path.exists() and result.cells_run == 2
+
+
+@pytest.mark.unit
+def test_a_cell_already_in_the_log_is_not_run_again(tmp_path):
+    config = _config(tmp_path)
+    first = run_backtest(["NVDA"], ["2026-01-05"], config)
+
+    again = run_backtest(["NVDA"], ["2026-01-05", "2026-01-12"], config, run_id=first.run_id)
+
+    assert again.cells_run == 1 and again.skipped == 1
+    assert _FakeGraph.instances[-1].calls == [("NVDA", "2026-01-12")]
+
+
+@pytest.mark.unit
+def test_every_ticker_is_settled_after_the_grid(tmp_path):
+    """Settlement runs at the start of the next same-ticker run, so the last
+    date of each ticker would stay pending without an explicit pass."""
+    run_backtest(["NVDA", "AAPL"], ["2026-01-05", "2026-01-12"], _config(tmp_path))
+    assert sorted(_FakeGraph.instances[-1].settled) == ["AAPL", "NVDA"]
+
+
+@pytest.mark.unit
+def test_a_failed_cell_does_not_abort_the_sweep(tmp_path):
+    _FakeGraph.fail_on = {("NVDA", "2026-01-05")}
+    result = run_backtest(["NVDA"], ["2026-01-05", "2026-01-12"], _config(tmp_path))
+
+    assert result.cells_run == 1
+    assert result.failures == [("NVDA", "2026-01-05", "vendor exploded")]
+
+
+# --- reading the result ------------------------------------------------------
+
+def _log_with(tmp_path, rows):
+    log = TradingMemoryLog({"memory_log_path": str(tmp_path / "m.md")})
+    for ticker, date, decision, outcome in rows:
+        log.store_decision(ticker, date, decision)
+        if outcome is not None:
+            log.update_with_outcome(ticker, date, outcome[0], outcome[1], 5, "note", "2026-02-01")
+    return tmp_path / "m.md"
+
+
+@pytest.mark.unit
+def test_summary_scores_resolved_cells_and_keeps_pending_out_of_the_average(tmp_path):
+    log = _log_with(tmp_path, [
+        ("NVDA", "2026-01-05", "Rating: Buy\n\nx", (0.10, 0.04)),
+        ("NVDA", "2026-01-12", "Rating: Buy\n\nx", (-0.02, -0.02)),
+        ("AAPL", "2026-01-05", "Rating: Sell\n\nx", None),
+    ])
+
+    summary = summarize(log)
+
+    assert summary.resolved == 2 and summary.pending == 1
+    buys = summary.by_rating["Buy"]
+    assert buys.count == 2 and buys.hit_rate == 0.5 and round(buys.mean_alpha, 4) == 0.01
+    assert "Sell" not in summary.by_rating  # unsettled: nothing to score yet
+
+
+@pytest.mark.unit
+def test_summary_states_what_it_cannot_prove(tmp_path):
+    text = summarize(_log_with(tmp_path, [("NVDA", "2026-01-05", DECISION, (0.1, 0.05))])).render()
+    assert "not archived" in text
+    assert "one" in text.lower() and "sampl" in text.lower()
+
+
+@pytest.mark.unit
+def test_the_analyst_set_under_test_is_the_one_that_runs(tmp_path):
+    """A backtest of a two-analyst setup must not silently run four."""
+    run_backtest(["NVDA"], ["2026-01-05"], _config(tmp_path), selected_analysts=["market", "news"])
+    assert _FakeGraph.instances[-1].analysts == ["market", "news"]
+
+
+@pytest.mark.unit
+def test_sweeps_started_in_the_same_second_get_their_own_runs(tmp_path, monkeypatch):
+    import tradingagents.backtest as backtest
+
+    class _Frozen(backtest.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 20, 9, 30, 0)
+
+    monkeypatch.setattr(backtest, "datetime", _Frozen)
+    first = run_backtest(["NVDA"], ["2026-01-05"], _config(tmp_path))
+    second = run_backtest(["NVDA"], ["2026-01-05"], _config(tmp_path))
+
+    assert first.run_id == "20260120_093000" and second.run_id == "20260120_093000_2"
+    assert first.cells_run == second.cells_run == 1
+
+
+@pytest.mark.unit
+def test_a_run_id_cannot_escape_the_results_directory(tmp_path):
+    """run_id becomes a path segment, so it is validated like a ticker is."""
+    with pytest.raises(ValueError):
+        run_backtest(["NVDA"], ["2026-01-05"], _config(tmp_path), run_id="../../escaped")
+    with pytest.raises(ValueError):
+        run_backtest(["NVDA"], ["2026-01-05"], _config(tmp_path), run_id="/etc/cron.d/x")
+
+
+@pytest.mark.unit
+def test_a_failed_settlement_does_not_lose_the_remaining_tickers(tmp_path, monkeypatch):
+    """Settlement reflects with an LLM, so it can fail; the sweep still returns
+    its result and every other ticker still gets settled."""
+    settled = []
+
+    def _settle(self, ticker):
+        if ticker == "NVDA":
+            raise RuntimeError("reflector timed out")
+        settled.append(ticker)
+        return Settlement()
+
+    monkeypatch.setattr(_FakeGraph, "settle_pending", _settle, raising=False)
+    result = run_backtest(["NVDA", "AAPL"], ["2026-01-05"], _config(tmp_path))
+
+    assert result.cells_run == 2
+    assert settled == ["AAPL"]
+    assert result.settlement_failures == [("NVDA", "reflector timed out")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["prices", "reflection"])
+def test_handled_settlement_failures_reach_the_backtest_result(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    from tradingagents.memory import settlement
+
+    def returns(ticker, *args, **kwargs):
+        if ticker == "AAPL":
+            return None, None, None, None  # an incomplete window is not a failure
+        if failure == "prices":
+            raise RuntimeError("vendor unavailable")
+        return 0.1, 0.02, 5, "2026-02-01"
+
+    def reflect(**kwargs):
+        raise RuntimeError("reflector timed out")
+
+    def settle(self, ticker):
+        self.settled.append(ticker)
+        return settlement.settle_pending(
+            ticker, self.memory_log, SimpleNamespace(reflect_on_final_decision=reflect), self.config,
+        )
+
+    monkeypatch.setattr(settlement, "fetch_returns", returns)
+    monkeypatch.setattr(_FakeGraph, "settle_pending", settle)
+    result = run_backtest(
+        ["NVDA", "AAPL"], ["2026-01-05", "2026-01-12"], _config(tmp_path),
+    )
+
+    reason = ("prices unavailable: vendor unavailable" if failure == "prices"
+              else "reflection failed: reflector timed out")
+    assert result.settlement_failures == [
+        ("NVDA", f"2026-01-05: {reason}"),
+        ("NVDA", f"2026-01-12: {reason}"),
     ]
-    rows_ba = [rows_ab[2], rows_ab[3], rows_ab[0], rows_ab[1]]
-
-    mdd_ab = backtest.summarize(rows_ab)["max_drawdown"]
-    # by date: 01-02 -> +.15, 02-03 -> -.21; cum [.15, -.06]; drawdown -0.21.
-    assert mdd_ab == pytest.approx(-0.21)
-    assert backtest.summarize(rows_ba)["max_drawdown"] == pytest.approx(mdd_ab)
+    assert _FakeGraph.instances[-1].settled == ["NVDA", "AAPL"]
+    assert result.cells_run == 4 and not result.failures
+    assert len(_FakeGraph.instances[-1].memory_log.get_pending_entries()) == 4
 
 
-def test_calibration_table():
-    s = backtest.summarize(SAMPLE_ROWS)
-    cal = {(b["rating"], b["confidence"]): b for b in s["calibration"]}
-
-    assert cal[("Buy", "high")]["n"] == 2
-    assert cal[("Buy", "high")]["mean_alpha"] == pytest.approx(0.03)  # (.10 + -.04)/2
-    assert cal[("Buy", "high")]["hit_rate"] == pytest.approx(0.5)  # one right, one wrong
-
-    assert cal[("Sell", "high")]["hit_rate"] == pytest.approx(1.0)  # short, alpha -ve
-    assert cal[("Overweight", "medium")]["hit_rate"] == pytest.approx(1.0)
-    assert cal[("Underweight", "low")]["hit_rate"] == pytest.approx(0.0)  # short, alpha +ve
-
-    # Hold is resolved but has no directional hit semantics.
-    assert cal[("Hold", "low")]["n"] == 1
-    assert cal[("Hold", "low")]["hit_rate"] is None
+@pytest.mark.unit
+def test_pending_note_appears_only_when_something_is_pending(tmp_path):
+    settled = [("NVDA", "2026-01-05", DECISION, (0.1, 0.05))]
+    assert "Pending" not in summarize(_log_with(tmp_path, settled)).render()
+    assert "Pending" in summarize(_log_with(tmp_path, settled + [("AAPL", "2026-01-05", DECISION, None)])).render()
 
 
-def test_transaction_cost_shifts_strategy_metrics():
-    """cost is charged per directional call: mean alpha shifts by exactly -cost;
-    baselines that trade (always-Buy) are charged too, buy-and-hold is not."""
-    s0 = backtest.summarize(SAMPLE_ROWS)
-    s1 = backtest.summarize(SAMPLE_ROWS, cost=0.001)
+# --- scoring reads the direction the rating claimed ---------------------------
 
-    assert s1["cost"] == pytest.approx(0.001)
-    assert s1["mean_alpha"] == pytest.approx(s0["mean_alpha"] - 0.001)
-    # resolved alphas mean = 0.01 -> always-Buy pays cost, buy&hold doesn't
-    assert s0["baselines"]["always_buy_alpha"] == pytest.approx(0.01)
-    assert s1["baselines"]["always_buy_alpha"] == pytest.approx(0.009)
-    assert s1["baselines"]["buy_hold_raw"] == pytest.approx(
-        s0["baselines"]["buy_hold_raw"]
-    )
-    # hits unaffected in this dataset (no strat value within 0.001 of zero)
-    assert s1["hit_rate"] == pytest.approx(s0["hit_rate"])
+def _scored(tmp_path, rows):
+    log = _log_with(tmp_path, rows)
+    return summarize(log).by_rating
 
 
-def test_baselines_known_answers():
-    b = backtest.summarize(SAMPLE_ROWS)["baselines"]
-    # raw defaults to alpha in _row, so buy&hold == mean resolved alpha = 0.01
-    assert b["buy_hold_raw"] == pytest.approx(0.01)
-    assert b["always_buy_alpha"] == pytest.approx(0.01)
-    # random ±1 has expectation 0; with 1000 seeded trials the mean is tiny
-    assert b["random_alpha_std"] > 0
-    assert abs(b["random_alpha_mean"]) < 0.01
+@pytest.mark.unit
+def test_a_bearish_call_that_fell_counts_as_right(tmp_path):
+    """Alpha below the benchmark is the outcome a Sell predicted; scoring it as
+    a miss reported the system as wrong exactly when it was right."""
+    scores = _scored(tmp_path, [
+        ("NVDA", "2026-01-05", "**Rating**: Sell\n\nx", (-0.08, -0.05)),
+        ("AAPL", "2026-01-05", "**Rating**: Underweight\n\nx", (-0.03, -0.02)),
+    ])
+    assert scores["Sell"].hit_rate == 1.0
+    assert scores["Underweight"].hit_rate == 1.0
 
 
-def test_baselines_reproducible_by_seed():
-    b1 = backtest.summarize(SAMPLE_ROWS, seed=7)["baselines"]
-    b2 = backtest.summarize(SAMPLE_ROWS, seed=7)["baselines"]
-    b3 = backtest.summarize(SAMPLE_ROWS, seed=8)["baselines"]
-    assert b1["random_alpha_mean"] == b2["random_alpha_mean"]
-    assert b1["random_alpha_mean"] != b3["random_alpha_mean"]
+@pytest.mark.unit
+def test_a_bearish_call_that_rose_counts_as_wrong(tmp_path):
+    scores = _scored(tmp_path, [("NVDA", "2026-01-05", "**Rating**: Sell\n\nx", (0.08, 0.05))])
+    assert scores["Sell"].hit_rate == 0.0
 
 
-def test_by_confidence_slices():
-    s = backtest.summarize(SAMPLE_ROWS)
-    slices = {b["confidence"]: b for b in s["by_confidence"]}
-
-    # high: strat [+.10, -.04, +.06] (two Buys + one Sell, all directional)
-    assert slices["high"]["n"] == 3
-    assert slices["high"]["hit_rate"] == pytest.approx(2 / 3)
-    assert slices["high"]["mean_alpha"] == pytest.approx(0.04)
-    # medium: Overweight +.02 (NVDA row is unresolved -> excluded)
-    assert slices["medium"]["n"] == 1
-    assert slices["medium"]["hit_rate"] == pytest.approx(1.0)
-    # low: Underweight on +.03 alpha -> strat -.03 (Hold is non-directional)
-    assert slices["low"]["n"] == 1
-    assert slices["low"]["hit_rate"] == pytest.approx(0.0)
-    assert slices["low"]["mean_alpha"] == pytest.approx(-0.03)
-    # sorted high -> medium -> low
-    assert [b["confidence"] for b in s["by_confidence"]] == ["high", "medium", "low"]
+@pytest.mark.unit
+def test_a_bullish_call_is_scored_the_same_way_as_before(tmp_path):
+    scores = _scored(tmp_path, [
+        ("NVDA", "2026-01-05", "**Rating**: Buy\n\nx", (0.10, 0.04)),
+        ("AAPL", "2026-01-05", "**Rating**: Buy\n\nx", (-0.02, -0.02)),
+    ])
+    assert scores["Buy"].hit_rate == 0.5
 
 
-def test_confidence_weighted_alpha():
-    s = backtest.summarize(SAMPLE_ROWS)
-    # weights: high=1.5 (x3 calls), medium=1.0 (x1), low=0.5 (x1)
-    # sum(w*s) = 1.5*(.10-.04+.06) + 1.0*(.02) + 0.5*(-.03) = 0.185
-    # sum(w) = 4.5 + 1.0 + 0.5 = 6.0
-    assert s["confidence_weighted_alpha"] == pytest.approx(0.185 / 6.0)
+@pytest.mark.unit
+def test_hold_claims_no_direction_so_it_gets_no_hit_rate(tmp_path):
+    scores = _scored(tmp_path, [("NVDA", "2026-01-05", "**Rating**: Hold\n\nx", (0.01, 0.005))])
+    assert scores["Hold"].hit_rate is None
+    assert scores["Hold"].mean_alpha == 0.005
 
 
-def test_summarize_empty():
-    s = backtest.summarize([])
-    assert s["n_total"] == 0
-    assert s["hit_rate"] is None
-    assert s["signal_sharpe"] is None
-    assert s["max_drawdown"] is None
-    assert s["calibration"] == []
-    assert s["by_confidence"] == []
-    assert s["confidence_weighted_alpha"] is None
-    assert s["baselines"]["buy_hold_raw"] is None
-    assert s["baselines"]["random_alpha_mean"] is None
+@pytest.mark.unit
+def test_the_report_names_the_window_the_scores_cover(tmp_path):
+    text = summarize(_log_with(tmp_path, [
+        ("NVDA", "2026-01-05", "**Rating**: Buy\n\nx", (0.1, 0.05))])).render()
+    assert "5" in text and "day" in text.lower()
+    assert "Hold" not in text or "no direction" in text.lower()
 
 
-def test_lookahead_safe_default_excludes_social():
-    assert "social" not in backtest.LOOKAHEAD_SAFE_ANALYSTS
-    assert backtest.LOOKAHEAD_SAFE_ANALYSTS == ("market", "news", "fundamentals")
+@pytest.mark.unit
+def test_the_window_reported_is_the_one_the_outcomes_used(tmp_path):
+    """The log records the window each outcome was measured over; the summary
+    must not claim a different one."""
+    log = TradingMemoryLog({"memory_log_path": str(tmp_path / "m.md")})
+    log.store_decision("NVDA", "2026-01-05", "**Rating**: Buy\n\nx")
+    log.update_with_outcome("NVDA", "2026-01-05", 0.1, 0.04, 21, "note", "2026-02-01")
+
+    assert "21 trading days" in summarize(tmp_path / "m.md").render()
 
 
-def test_sample_dates_cadence():
-    import pandas as pd
+@pytest.mark.unit
+def test_a_backtest_result_is_summarized_directly(tmp_path):
+    """The result names its own log, so a caller never builds the log to score it."""
+    from tradingagents.backtest import BacktestResult
 
-    dates = backtest.sample_dates("2025-01-01", "2025-03-31", cadence_days=21)
-    assert dates[0] == "2025-01-01"  # first business day in range
-    assert len(dates) >= 3
-    assert all(d2 > d1 for d1, d2 in zip(dates, dates[1:], strict=False))  # ascending
-    # consecutive picks are exactly `cadence_days` business days apart
-    for d1, d2 in zip(dates, dates[1:], strict=False):
-        assert len(pd.bdate_range(d1, d2)) - 1 == 21
+    path = _log_with(tmp_path, [("NVDA", "2026-01-05", "Rating: Buy\n\nx", (0.10, 0.04))])
+
+    assert summarize(BacktestResult(run_id="r", log_path=path)).resolved == 1
 
 
-def test_run_backtest_resume_skips_recorded_points(tmp_path):
-    """A second run must not re-invoke the (expensive) per-point runner for
-    points already in the results file."""
-    results_path = tmp_path / "results.jsonl"
-    calls = []
+@pytest.mark.unit
+def test_a_log_path_that_does_not_exist_is_an_error_not_an_empty_summary(tmp_path):
+    missing = tmp_path / "no-such-dir" / "m.md"
 
-    def fake_run_point(ticker, date, *, selected_analysts, config, holding_days):
-        calls.append((ticker, date))
-        return _row(ticker, date, "Buy", "high", 0.05, holding=holding_days)
-
-    # First run over a 2-date schedule for one ticker.
-    rows1 = backtest.run_backtest(
-        ["AAPL"], "2025-01-01", "2025-03-31",
-        cadence_days=40, holding_days=5,
-        results_path=results_path, run_point=fake_run_point,
-    )
-    first_call_count = len(calls)
-    assert first_call_count >= 1
-    assert len(rows1) == first_call_count
-
-    # Second run with the same schedule: every point already recorded -> no calls.
-    calls.clear()
-    rows2 = backtest.run_backtest(
-        ["AAPL"], "2025-01-01", "2025-03-31",
-        cadence_days=40, holding_days=5,
-        results_path=results_path, run_point=fake_run_point,
-    )
-    assert calls == []  # fully resumed
-    assert len(rows2) == first_call_count
+    with pytest.raises(FileNotFoundError):
+        summarize(missing)
+    assert not missing.parent.exists()
 
 
-def test_run_backtest_skips_failing_point(tmp_path):
-    """A point whose runner raises is skipped (not persisted) so the sweep
-    finishes and a re-run retries it."""
-    results_path = tmp_path / "results.jsonl"
-    dates = backtest.sample_dates("2025-01-01", "2025-06-30", 40)
-    fail_date = dates[0]
-    assert len(dates) >= 2  # need a survivor to prove the sweep continued
+@pytest.mark.unit
+def test_a_result_whose_cells_all_failed_summarizes_as_empty(tmp_path):
+    from tradingagents.backtest import BacktestResult
 
-    def flaky_run_point(ticker, date, *, selected_analysts, config, holding_days):
-        if date == fail_date:
-            raise RuntimeError("transient LLM error")
-        return _row(ticker, date, "Buy", "high", 0.05, holding=holding_days)
+    result = BacktestResult(run_id="r", log_path=tmp_path / "never-written.md")
 
-    rows = backtest.run_backtest(
-        ["AAPL"], "2025-01-01", "2025-06-30",
-        cadence_days=40, holding_days=5,
-        results_path=results_path, run_point=flaky_run_point,
-    )
-    # The failing date is absent; the rest of the sweep completed.
-    assert fail_date not in [r["date"] for r in rows]
-    assert len(rows) == len(dates) - 1
-    # Nothing about the failure was written to disk (so a re-run retries it).
-    assert len(backtest._load_existing(results_path)) == len(rows)
+    assert summarize(result).resolved == 0
 
 
-def test_run_backtest_retries_unresolved_outcome(tmp_path):
-    """A point whose outcome can't be resolved yet (alpha_return None) is not
-    persisted, so a later run retries it instead of treating it as done."""
-    results_path = tmp_path / "results.jsonl"
-    calls = []
-    state = {"resolved": False}
+@pytest.mark.unit
+def test_progress_is_reported_before_each_cell(tmp_path):
+    seen = []
 
-    def run_point(ticker, date, *, selected_analysts, config, holding_days):
-        calls.append((ticker, date))
-        alpha = 0.05 if state["resolved"] else None  # unavailable on first pass
-        return _row(ticker, date, "Buy", "high", alpha, holding=holding_days)
+    run_backtest(["NVDA", "AAPL"], ["2026-01-05", "2026-01-12"], _config(tmp_path),
+                 progress=lambda done, total, ticker, date: seen.append((done, total, ticker, date)))
 
-    rows1 = backtest.run_backtest(
-        ["AAPL"], "2025-01-01", "2025-01-10",
-        cadence_days=40, holding_days=5,
-        results_path=results_path, run_point=run_point,
-    )
-    n = len(calls)
-    assert n >= 1
-    assert rows1 == []  # unresolved -> not returned
-    assert backtest._load_existing(results_path) == []  # and not persisted
-
-    # Data now available: the same points are retried (not skipped) and persisted.
-    state["resolved"] = True
-    calls.clear()
-    rows2 = backtest.run_backtest(
-        ["AAPL"], "2025-01-01", "2025-01-10",
-        cadence_days=40, holding_days=5,
-        results_path=results_path, run_point=run_point,
-    )
-    assert len(calls) == n  # retried, not skipped-forever
-    assert len(rows2) == n and all(r["alpha_return"] == 0.05 for r in rows2)
+    assert seen == [(1, 4, "NVDA", "2026-01-05"), (2, 4, "NVDA", "2026-01-12"),
+                    (3, 4, "AAPL", "2026-01-05"), (4, 4, "AAPL", "2026-01-12")]
 
 
-def test_isolated_config_isolates_state_and_guards_lookahead(tmp_path):
-    cfg = backtest._isolated_config(
-        {"memory_log_path": "/real/log.md", "results_dir": "/real/results"},
-        tmp_path,
-    )
-    assert cfg["memory_log_path"] is None  # no-memory eval mode
-    assert cfg["disable_lookahead_tools"] is True  # live "now" tools neutralized
-    assert cfg["checkpoint_enabled"] is False
-    assert str(tmp_path) in cfg["results_dir"]
-    assert str(tmp_path) in cfg["data_cache_dir"]
+@pytest.mark.unit
+def test_a_resumed_sweep_reports_only_the_cells_it_runs(tmp_path):
+    first = run_backtest(["NVDA"], ["2026-01-05"], _config(tmp_path))
+    seen = []
+
+    run_backtest(["NVDA"], ["2026-01-05", "2026-01-12"], _config(tmp_path), run_id=first.run_id,
+                 progress=lambda done, total, ticker, date: seen.append((done, total, date)))
+
+    assert seen == [(1, 1, "2026-01-12")]
 
 
-def test_lookahead_guard_disables_live_tools():
-    """With the eval guard set, the two 'now'-reading tools return a sentinel
-    instead of leaking current price / market odds into a historical date."""
-    from tradingagents.agents.utils.core_stock_tools import get_live_quote
-    from tradingagents.agents.utils.prediction_markets_tools import (
-        get_prediction_markets,
-    )
-    from tradingagents.dataflows.config import set_config
-
-    try:
-        set_config({"disable_lookahead_tools": True})
-        assert "disabled" in get_live_quote.invoke({"symbol": "AAPL"}).lower()
-        assert "disabled" in get_prediction_markets.invoke(
-            {"topic": "Fed rate cut"}
-        ).lower()
-    finally:
-        set_config({"disable_lookahead_tools": False})
-
-
-def test_lookahead_guard_disables_fundamentals_live_tools():
-    """With the eval guard set, the 'now'-reading fundamentals/news tools
-    return a sentinel instead of leaking current data into a historical date."""
-    from tradingagents.agents.utils.fundamental_data_tools import (
-        get_analyst_recommendations,
-        get_fundamentals,
-    )
-    from tradingagents.agents.utils.news_data_tools import get_insider_transactions
-    from tradingagents.dataflows.config import set_config
-
-    try:
-        set_config({"disable_lookahead_tools": True})
-        assert "disabled" in get_fundamentals.invoke(
-            {"ticker": "AAPL", "curr_date": "2025-01-02"}
-        ).lower()
-        assert "disabled" in get_analyst_recommendations.invoke(
-            {"ticker": "AAPL"}
-        ).lower()
-        assert "disabled" in get_insider_transactions.invoke(
-            {"ticker": "AAPL"}
-        ).lower()
-    finally:
-        set_config({"disable_lookahead_tools": False})
-
-
-def test_render_report_smoke():
-    report = backtest.render_report(backtest.summarize(SAMPLE_ROWS))
-    assert "Hit-rate" in report or "hit-rate" in report
-    assert "Calibration" in report
-    assert "Baselines" in report
-    assert "By confidence" in report
-
-
-# --- Part A: confidence on the final decision ----------------------------------
-
-
-def test_portfolio_decision_confidence_roundtrips():
-    d = PortfolioDecision(
-        rating="Buy",
-        confidence="high",
-        executive_summary="Enter on strength.",
-        investment_thesis="Fundamentals and trend agree.",
-    )
-    assert d.confidence == "high"
-    assert "**Confidence**: high" in render_pm_decision(d)
-
-
-def test_portfolio_decision_confidence_defaults_to_medium():
-    d = PortfolioDecision(
-        rating="Hold",
-        executive_summary="No action.",
-        investment_thesis="Mixed signals.",
-    )
-    assert d.confidence == "medium"
+@pytest.mark.unit
+def test_a_ticker_or_date_given_twice_runs_and_settles_once(tmp_path):
+    run_backtest(["NVDA", "NVDA"], ["2026-01-05", "2026-01-05"], _config(tmp_path))
+    graph = _FakeGraph.instances[-1]
+    assert graph.calls == [("NVDA", "2026-01-05")]
+    assert graph.settled == ["NVDA"]

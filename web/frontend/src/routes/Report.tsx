@@ -105,7 +105,7 @@ export function ReportPage() {
             <SkeletonText lines={2} className="opacity-30" />
           </div>
         </section>
-        <section className="bg-surface px-32p py-80p">
+        <section className="bg-canvas px-32p py-80p">
           <div className="mx-auto max-w-5xl space-y-32p">
             <SkeletonCard />
             <SkeletonCard />
@@ -140,7 +140,7 @@ export function ReportPage() {
     <div className="space-y-0">
       <section className="bg-inverse text-inverse-fg px-32p py-80p">
         <div className="mx-auto max-w-5xl space-y-6">
-          <p className="font-display text-nav text-inverse-fg/60">{data.folder}</p>
+          <p className="font-mono text-body text-cool">{data.folder}</p>
           <h1 className="font-display text-display-hero font-medium">
             {data.ticker}
           </h1>
@@ -159,7 +159,7 @@ export function ReportPage() {
               decisionDetail.confidence) && (
               <dl className="flex flex-wrap gap-4">
                 {decisionDetail.confidence && (
-                  <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+                  <div className="rounded-card border border-edge bg-surface px-4 py-3">
                     <dt className="font-display text-nav text-inverse-fg/60">
                       Confidence
                     </dt>
@@ -169,17 +169,17 @@ export function ReportPage() {
                   </div>
                 )}
                 {decisionDetail.price_target !== null && (
-                  <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+                  <div className="rounded-card border border-edge bg-surface px-4 py-3">
                     <dt className="font-display text-nav text-inverse-fg/60">
                       Price Target
                     </dt>
-                    <dd className="font-display text-feature font-medium">
+                    <dd className="font-mono text-feature">
                       {decisionDetail.price_target}
                     </dd>
                   </div>
                 )}
                 {decisionDetail.time_horizon && (
-                  <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+                  <div className="rounded-card border border-edge bg-surface px-4 py-3">
                     <dt className="font-display text-nav text-inverse-fg/60">
                       Time Horizon
                     </dt>
@@ -191,7 +191,7 @@ export function ReportPage() {
               </dl>
             )}
           {decisionDetail?.what_would_change_it && (
-            <div className="rounded-xl bg-inverse-fg/10 px-4 py-3">
+            <div className="rounded-card border border-edge bg-surface px-4 py-3">
               <p className="font-display text-nav text-inverse-fg/60">
                 What Would Change It
               </p>
@@ -203,7 +203,7 @@ export function ReportPage() {
         </div>
       </section>
 
-      <section className="bg-surface px-32p py-80p">
+      <section className="bg-canvas px-32p py-80p">
         <div className="mx-auto max-w-5xl space-y-32p">
           {decisionDetail && (
             <>

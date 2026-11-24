@@ -46,13 +46,13 @@ function StatusIcon({ status }: { status: AgentStatus | undefined }) {
       return (
         <Loader2
           size={14}
-          className={`${cls} text-rui-blue motion-safe:animate-spin`}
+          className={`${cls} text-accent motion-safe:animate-spin`}
         />
       );
     case "completed":
-      return <Check size={14} className={`${cls} text-rui-teal`} />;
+      return <Check size={14} className={`${cls} text-ok`} />;
     case "error":
-      return <AlertTriangle size={14} className={`${cls} text-rui-danger`} />;
+      return <AlertTriangle size={14} className={`${cls} text-bad`} />;
     case "pending":
       return <Clock size={14} className={`${cls} text-muted`} />;
     default:
@@ -62,7 +62,7 @@ function StatusIcon({ status }: { status: AgentStatus | undefined }) {
 
 function fmtClock(iso: string | undefined | null): string {
   if (!iso) return "—";
-  return iso.slice(11, 19);
+  return new Date(iso).toLocaleTimeString();
 }
 
 function fmtDur(ms: number): string {
@@ -115,7 +115,7 @@ export function AgentTimeline({
         <p className="font-display text-body-em text-inverse-fg/80">
           Agent timeline
         </p>
-        <p className="font-display text-xs text-inverse-fg/60">
+        <p className="font-mono text-xs text-cool">
           {fmtClock(runStartedAt)} → {fmtClock(runFinishedAt ?? now)}
           {t0 != null && ` · ${fmtDur(total)}`}
         </p>
@@ -123,7 +123,7 @@ export function AgentTimeline({
       <div className="space-y-4">
         {GROUPS.filter((g) => grouped[g.label]?.length).map((group) => (
           <div key={group.label} className="space-y-2">
-            <p className="font-display text-xs uppercase tracking-wider text-inverse-fg/50">
+            <p className="font-display text-xs font-medium text-inverse-fg/50">
               {group.label}
             </p>
             <div className="space-y-1.5">
@@ -150,11 +150,11 @@ export function AgentTimeline({
                     : 0;
                 const barCls =
                   status === "completed"
-                    ? "bg-rui-teal"
+                    ? "bg-ok"
                     : status === "error"
-                      ? "bg-rui-danger"
+                      ? "bg-bad"
                       : status === "in_progress"
-                        ? "bg-rui-blue motion-safe:animate-pulse"
+                        ? "bg-accent motion-safe:animate-pulse"
                         : "bg-inverse-fg/20";
                 const dur =
                   startMs != null && endMs != null
@@ -163,7 +163,7 @@ export function AgentTimeline({
                 return (
                   <div
                     key={agent}
-                    className="grid grid-cols-[160px_1fr_56px] items-center gap-3"
+                    className="grid grid-cols-[160px_1fr_56px] md:grid-cols-[200px_1fr_56px] items-center gap-3"
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <StatusIcon status={status} />
@@ -185,7 +185,7 @@ export function AgentTimeline({
                         />
                       )}
                     </div>
-                    <span className="font-display text-xs text-inverse-fg/60 text-right tabular-nums">
+                    <span className="font-mono text-xs text-inverse-fg/60 text-right tabular-nums">
                       {dur ?? (status === "pending" ? "queued" : "—")}
                     </span>
                   </div>

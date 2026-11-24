@@ -1,18 +1,18 @@
 import type { AgentStatus, RunStatus } from "../../types";
 
 const agentColor: Record<AgentStatus, string> = {
-  pending: "bg-subtle/20 text-muted",
-  in_progress: "bg-rui-blue/15 text-rui-blue",
-  completed: "bg-rui-teal/15 text-rui-teal",
-  error: "bg-rui-danger/15 text-rui-danger",
+  pending: "text-muted",
+  in_progress: "bg-accent-soft text-accent",
+  completed: "bg-ok-soft text-ok",
+  error: "bg-bad-soft text-bad",
 };
 
 const runColor: Record<RunStatus, string> = {
-  queued: "bg-rui-yellow/15 text-rui-yellow",
-  running: "bg-rui-blue/15 text-rui-blue",
-  done: "bg-rui-teal/15 text-rui-teal",
-  error: "bg-rui-danger/15 text-rui-danger",
-  cancelled: "bg-subtle/20 text-muted",
+  queued: "text-muted",
+  running: "bg-accent-soft text-accent",
+  done: "bg-ok-soft text-ok",
+  error: "bg-bad-soft text-bad",
+  cancelled: "text-muted",
 };
 
 export function StatusBadge({
@@ -28,32 +28,11 @@ export function StatusBadge({
   const cls = (map as Record<string, string>)[status] ?? agentColor.pending;
   return (
     <span
-      className={`inline-flex items-center gap-2 rounded-pill px-3 py-1 text-body-em font-display ${cls}`}
+      className={`inline-flex items-center gap-2 rounded-chip border border-edge px-3 py-1 text-body-em font-display font-medium ${cls}`}
     >
-      <Dot status={status} />
       {label ?? status.replace("_", " ")}
     </span>
   );
-}
-
-function Dot({ status }: { status: string }) {
-  const color =
-    status === "in_progress" || status === "running"
-      ? "bg-rui-blue"
-      : status === "completed" || status === "done"
-        ? "bg-rui-teal"
-        : status === "error"
-          ? "bg-rui-danger"
-          : status === "queued"
-            ? "bg-rui-yellow"
-            : status === "cancelled"
-              ? "bg-subtle"
-              : "bg-subtle";
-  const animate =
-    status === "in_progress" || status === "running"
-      ? "motion-safe:animate-pulse"
-      : "";
-  return <span className={`h-2 w-2 rounded-pill ${color} ${animate}`} />;
 }
 
 export function DecisionBadge({
@@ -69,23 +48,17 @@ export function DecisionBadge({
   const isSell = /\b(SELL|UNDERWEIGHT)\b/.test(upper);
   const isHold = /\bHOLD\b/.test(upper);
   const cls = isBuy && !isSell
-    ? "bg-rui-teal text-white"
+    ? "bg-ok-soft text-ok"
     : isSell && !isBuy
-      ? "bg-rui-danger text-white"
+      ? "bg-bad-soft text-bad"
       : isHold
-        ? "bg-rui-yellow text-white"
-        : "bg-subtle text-white";
+        ? "bg-surface text-fg"
+        : "bg-surface text-muted";
   return (
     <span
-      className={`inline-flex items-center gap-2 rounded-pill px-32p py-14p font-display text-nav font-medium ${cls} ${
-        preview ? "opacity-80" : ""
-      }`}
+      className={`inline-flex items-center gap-2 rounded-pill border border-edge-strong px-4 py-2 font-display text-nav font-medium ${cls}`}
     >
-      {preview && (
-        <span className="text-xs uppercase tracking-wider opacity-80">
-          Preview
-        </span>
-      )}
+      {preview && <span className="text-xs text-muted">Preview</span>}
       {upper}
     </span>
   );

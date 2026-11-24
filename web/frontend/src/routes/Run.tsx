@@ -64,9 +64,9 @@ export function RunPage() {
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="space-y-3">
               <p className="font-display text-nav text-inverse-fg/60">
-                Run {runId?.slice(0, 8)}
+                Run <span className="font-mono text-cool">{runId?.slice(0, 8)}</span>
               </p>
-              <h1 className="font-display text-display-hero font-medium">
+              <h1 className="font-display text-section md:text-display-hero font-medium">
                 {state.decision ? (
                   <DecisionBadge decision={state.decision} />
                 ) : (
@@ -118,7 +118,7 @@ export function RunPage() {
           {/* Live decision preview — shown while still running. */}
           {!state.decision && liveDecision && (
             <div className="flex items-center gap-3">
-              <span className="font-display text-xs uppercase tracking-wider text-inverse-fg/60">
+              <span className="font-display text-xs font-medium text-inverse-fg/60">
                 Tentative
               </span>
               <DecisionBadge decision={liveDecision} preview />
@@ -139,27 +139,29 @@ export function RunPage() {
           ) : null}
 
           {state.reconnecting && (
-            <Card className="bg-rui-yellow/10 text-rui-yellow border-rui-yellow/30">
+            // Not <Card>: its base bg/text/border classes sort after these
+            // tints in Tailwind's output and would win.
+            <section role="status" className="rounded-card border border-accent/40 bg-accent-soft p-32p text-accent">
               <p className="font-display text-body-em">Connection interrupted. Reconnecting…</p>
               {state.lastError && (
                 <p className="mt-2 text-body">{state.lastError}</p>
               )}
-            </Card>
+            </section>
           )}
 
           {state.error && (
-            <Card className="bg-rui-danger text-white border-0">
+            <section role="alert" className="rounded-card border border-bad/40 bg-bad-soft p-32p text-bad">
               <p className="font-display text-feature font-medium mb-2">Error</p>
               <pre className="whitespace-pre-wrap text-body">{state.error}</pre>
-            </Card>
+            </section>
           )}
 
           {cancelMutation.isError && (
-            <Card className="bg-rui-danger/10 text-rui-danger border-rui-danger/30">
+            <section role="alert" className="rounded-card border border-bad/40 bg-bad-soft p-32p text-bad">
               <p className="font-display text-body-em">
                 Could not cancel: {String(cancelMutation.error)}
               </p>
-            </Card>
+            </section>
           )}
 
           <div className="flex flex-wrap gap-4">
@@ -180,7 +182,7 @@ export function RunPage() {
       </section>
 
       {/* Alternating elevated surface: streaming report + activity feed */}
-      <section className="bg-surface px-32p py-80p">
+      <section className="bg-canvas px-32p py-80p">
         <div className="mx-auto max-w-7xl grid grid-cols-1 lg:grid-cols-3 gap-32p">
           <Card className="lg:col-span-2 max-h-[80vh] overflow-y-auto">
             <h2 className="font-display text-card font-medium mb-4">
@@ -306,10 +308,10 @@ function ActivityFeed({
             <div key={idx} className="border-b border-edge/60 pb-2 last:border-0">
               <div className="flex items-center gap-2 mb-1">
                 <Icon size={12} className="text-muted" aria-hidden="true" />
-                <span className="font-display text-xs text-subtle">
-                  {it.ts.slice(11, 19)}
+                <span className="font-mono text-xs text-cool">
+                  {new Date(it.ts).toLocaleTimeString()}
                 </span>
-                <span className="font-display text-xs uppercase tracking-wider text-muted">
+                <span className="font-display text-xs font-medium text-muted">
                   {it.kind}
                 </span>
               </div>
@@ -320,7 +322,7 @@ function ActivityFeed({
                   onClick={() =>
                     setExpanded((s) => ({ ...s, [idx]: !s[idx] }))
                   }
-                  className="mt-1 font-display text-xs text-rui-blue hover:opacity-85"
+                  className="mt-1 font-display text-xs text-muted underline decoration-edge-strong underline-offset-2 hover:text-accent"
                 >
                   {isOpen ? "Show less" : "Show more"}
                 </button>

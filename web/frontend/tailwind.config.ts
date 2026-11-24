@@ -1,74 +1,56 @@
 /** Tailwind config — encodes the DESIGN.md token system. */
 import type { Config } from "tailwindcss";
 
+// Tokens are OKLCH channels in tokens.css; <alpha-value> keeps `/60` modifiers working.
+const token = (name: string) => `oklch(var(--color-${name}) / <alpha-value>)`;
+
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        // Theme-aware semantic tokens (resolve via CSS vars in tokens.css).
-        // Use these for everything that should flip with light/dark mode.
-        canvas: "var(--color-bg)",
-        fg: "var(--color-fg)",
-        muted: "var(--color-muted)",
-        subtle: "var(--color-subtle)",
-        edge: "var(--color-border)",
-        surface: "var(--color-surface)",
-        inverse: "var(--color-inverse)",
-        "inverse-fg": "var(--color-inverse-fg)",
-        // Brand fixed tokens (do NOT flip — kept for backward compatibility
-        // and for cases where the literal Revolut Dark is intentional).
-        dark: "#191c1f",
-        // RUI semantic tokens
-        rui: {
-          blue: "#494fdf",
-          "action-blue": "#4f55f1",
-          "blue-text": "#376cd5",
-          danger: "#e23b4a",
-          "deep-pink": "#e61e49",
-          warning: "#ec7e00",
-          yellow: "#b09000",
-          teal: "#00a87e",
-          "light-green": "#428619",
-          "green-text": "#006400",
-          "light-blue": "#007bc2",
-          brown: "#936d62",
-          "red-text": "#8b0000",
+        canvas: token("bg"),
+        fg: token("fg"),
+        muted: token("muted"),
+        subtle: token("subtle"),
+        edge: { DEFAULT: token("border"), strong: token("border-strong") },
+        surface: token("surface"),
+        // Deepest graphite step: hero bands, code and inputs.
+        inverse: token("inverse"),
+        "inverse-fg": token("inverse-fg"),
+        accent: {
+          DEFAULT: token("accent"),
+          ink: token("accent-ink"),
+          soft: token("accent-soft"),
         },
-        // Neutral scale
-        slate: {
-          mid: "#505a63",
-          cool: "#8d969e",
-          tone: "#c9c9cd",
-        },
+        cool: { DEFAULT: token("cool"), soft: token("cool-soft") },
+        ok: { DEFAULT: token("ok"), soft: token("ok-soft") },
+        bad: { DEFAULT: token("bad"), soft: token("bad-soft") },
       },
       fontFamily: {
-        display: [
-          "Aeonik Pro",
-          "Inter",
-          "system-ui",
-          "-apple-system",
-          "sans-serif",
-        ],
-        body: ["Inter", "system-ui", "-apple-system", "sans-serif"],
+        display: ["Host Grotesk", "ui-sans-serif", "system-ui", "sans-serif"],
+        body: ["Host Grotesk", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["Atkinson Hyperlegible Mono", "ui-monospace", "monospace"],
       },
       // Type scale per DESIGN.md (size, line-height, letter-spacing)
       fontSize: {
-        "display-mega": ["8.5rem", { lineHeight: "1.00", letterSpacing: "-2.72px" }],
-        "display-hero": ["5rem", { lineHeight: "1.00", letterSpacing: "-0.8px" }],
-        section: ["3rem", { lineHeight: "1.21", letterSpacing: "-0.48px" }],
-        sub: ["2.5rem", { lineHeight: "1.20", letterSpacing: "-0.4px" }],
-        card: ["2rem", { lineHeight: "1.19", letterSpacing: "-0.32px" }],
+        "display-mega": ["8.5rem", { lineHeight: "1.02", letterSpacing: "-0.03em" }],
+        "display-hero": ["5rem", { lineHeight: "1.04", letterSpacing: "-0.03em" }],
+        section: ["3rem", { lineHeight: "1.04", letterSpacing: "-0.03em" }],
+        sub: ["2.5rem", { lineHeight: "1.05", letterSpacing: "-0.03em" }],
+        card: ["2rem", { lineHeight: "1.1", letterSpacing: "-0.03em" }],
         feature: ["1.5rem", { lineHeight: "1.33", letterSpacing: "0px" }],
         nav: ["1.25rem", { lineHeight: "1.40", letterSpacing: "0px" }],
-        "body-lg": ["1.125rem", { lineHeight: "1.56", letterSpacing: "-0.09px" }],
-        body: ["1rem", { lineHeight: "1.50", letterSpacing: "0.24px" }],
-        "body-em": ["1rem", { lineHeight: "1.50", letterSpacing: "0.16px" }],
+        "body-lg": ["1.125rem", { lineHeight: "1.55", letterSpacing: "0px" }],
+        body: ["1rem", { lineHeight: "1.55", letterSpacing: "0px" }],
+        "body-em": ["1rem", { lineHeight: "1.55", letterSpacing: "0px" }],
       },
       borderRadius: {
-        sm: "12px",
-        card: "20px",
-        pill: "9999px",
+        chip: "4px",
+        sm: "6px",
+        card: "10px",
+        // Name kept from the old pill buttons; Console controls are 6px.
+        pill: "6px",
       },
       spacing: {
         "14p": "14px",
@@ -80,7 +62,7 @@ export default {
       },
       // Disable shadows entirely — DESIGN.md mandates flat surfaces.
       boxShadow: {
-        focus: "0 0 0 0.125rem rgba(73, 79, 223, 0.45)",
+        focus: "0 0 0 2px oklch(var(--color-accent) / 0.6)",
       },
     },
   },

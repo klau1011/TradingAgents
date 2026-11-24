@@ -41,15 +41,15 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       return (
         <div className="mx-auto max-w-3xl px-32p py-80p">
-          <div className="rounded-card border-2 border-rui-danger bg-rui-danger/10 p-6">
-            <h2 className="font-display text-card font-medium text-rui-danger">
+          <div className="rounded-card border border-bad/40 bg-bad-soft p-6">
+            <h2 className="font-display text-card font-medium text-bad">
               Something went wrong
             </h2>
             <p className="mt-2 text-body text-fg">{this.state.message}</p>
             <button
               type="button"
               onClick={this.reload}
-              className="mt-6 rounded-pill border-2 border-edge px-4 py-2 font-display text-body-em text-fg hover:opacity-85"
+              className="mt-6 rounded-pill border border-edge-strong px-4 py-2 font-display text-body-em text-fg hover:opacity-85"
             >
               Reload page
             </button>

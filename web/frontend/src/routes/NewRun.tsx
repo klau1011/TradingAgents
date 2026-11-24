@@ -51,7 +51,9 @@ export function NewRunPage() {
     return Array.from(set).sort();
   }, [runs.data, reports.data]);
 
-  const today = new Date().toISOString().slice(0, 10);
+  // Local date as YYYY-MM-DD (en-CA's format); toISOString would give the UTC
+  // date, which is already tomorrow on a US evening.
+  const today = new Date().toLocaleDateString("en-CA");
   // Ticker, date and position note stay per-run: restoring a stale one would
   // silently analyze the wrong thing. Everything else is a setting you re-pick
   // identically every time, so it persists.
@@ -269,7 +271,12 @@ export function NewRunPage() {
             </Field>
           )}
 
-          <Field label="Analysts">
+          {/* Not <Field>: a <label> around buttons forwards its clicks to the
+              first one and folds every chip into that button's name. */}
+          <fieldset>
+            <legend className="block font-display text-body-em font-medium text-muted mb-2 text-sm">
+              Analysts
+            </legend>
             <div className="flex flex-wrap gap-3">
               {opts.analysts.map((a) => {
                 const on = analysts.includes(a.key);
@@ -278,10 +285,11 @@ export function NewRunPage() {
                     type="button"
                     key={a.key}
                     onClick={() => toggleAnalyst(a.key)}
-                    className={`rounded-pill px-32p py-3 font-display text-body-em border-2 transition-opacity ${
+                    aria-pressed={on}
+                    className={`rounded-pill px-4 py-2 font-display text-body-em font-medium border transition-opacity ${
                       on
-                        ? "bg-inverse text-inverse-fg border-inverse"
-                        : "bg-canvas text-fg border-edge hover:opacity-85"
+                        ? "bg-cool-soft text-cool border-cool/60"
+                        : "bg-canvas text-fg border-edge-strong hover:opacity-85"
                     }`}
                   >
                     {a.label}
@@ -289,7 +297,7 @@ export function NewRunPage() {
                 );
               })}
             </div>
-          </Field>
+          </fieldset>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-32p">
             <Field label="Provider">
@@ -312,7 +320,7 @@ export function NewRunPage() {
               {keyStatus && (
                 <p
                   className={`mt-2 text-body-em ${
-                    keyStatus.set ? "text-rui-teal" : "text-rui-danger"
+                    keyStatus.set ? "text-ok" : "text-bad"
                   }`}
                 >
                   {keyStatus.set
@@ -420,7 +428,7 @@ export function NewRunPage() {
             </Field>
           )}
 
-          {err && <p className="text-rui-danger text-body">{err}</p>}
+          {err && <p role="alert" className="text-bad text-body">{err}</p>}
 
           <div className="flex flex-wrap items-center gap-4">
             <Button type="submit" disabled={submitting || analysts.length === 0}>
@@ -443,8 +451,7 @@ export function NewRunPage() {
 }
 
 const inputCls =
-  "w-full bg-canvas text-fg text-body border-2 border-edge rounded-sm px-4 py-3 " +
-  "focus:outline-none focus:border-fg transition-colors";
+  "w-full bg-inverse text-fg text-body border border-subtle rounded-sm px-4 py-3";
 
 function Field({
   label,
@@ -455,7 +462,7 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="block font-display text-body-em font-medium text-muted mb-2 uppercase tracking-wider text-xs">
+      <span className="block font-display text-body-em font-medium text-muted mb-2 text-sm">
         {label}
       </span>
       {children}

@@ -71,7 +71,7 @@ export function SkeletonTable({
 /** Convenience wrapper: a "card-shaped" loading placeholder. */
 export function SkeletonCard({ children }: { children?: ReactNode }) {
   return (
-    <div className="bg-canvas rounded-card p-32p space-y-4">
+    <div className="bg-surface border border-edge rounded-card p-32p space-y-4">
       {children ?? (
         <>
           <Skeleton className="h-6 w-1/3" rounded="rounded-pill" />

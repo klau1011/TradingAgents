@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, FileText, ArrowRight } from "lucide-react";
+import { Activity, AlertTriangle, FileText, ArrowRight } from "lucide-react";
 import { api } from "../api";
 import { Card } from "../components/ui/Card";
 import { DecisionBadge, StatusBadge } from "../components/ui/StatusBadge";
@@ -50,13 +50,19 @@ export function HistoryPage() {
 
       <section className="space-y-6">
         <h2 className="font-display text-section font-medium">Active runs</h2>
-        <Card>
+        <Card className="overflow-x-auto">
           {runs.isLoading ? (
             <SkeletonTable rows={3} cols={6} />
+          ) : runs.error && !runs.data ? (
+            <EmptyState
+              icon={AlertTriangle}
+              title="Could not load runs"
+              description={String(runs.error)}
+            />
           ) : runs.data && runs.data.length > 0 ? (
             <table className="w-full text-left">
               <thead>
-                <tr className="text-muted font-display text-body-em uppercase tracking-wider text-xs">
+                <tr className="text-muted font-display text-body-em font-medium text-sm">
                   <th className="pb-4">Ticker</th>
                   <th className="pb-4">Date</th>
                   <th className="pb-4">Status</th>
@@ -71,7 +77,7 @@ export function HistoryPage() {
                     <td className="py-3 font-display text-feature">
                       {r.ticker}
                     </td>
-                    <td className="py-3 text-body">{r.analysis_date}</td>
+                    <td className="py-3 font-mono text-body">{r.analysis_date}</td>
                     <td className="py-3">
                       <StatusBadge status={r.status} kind="run" />
                     </td>
@@ -82,13 +88,13 @@ export function HistoryPage() {
                         <span className="text-subtle">—</span>
                       )}
                     </td>
-                    <td className="py-3 text-muted text-body">
-                      {r.started_at?.slice(11, 19) ?? "—"}
+                    <td className="py-3 font-mono text-muted text-body">
+                      {r.started_at ? new Date(r.started_at).toLocaleString() : "—"}
                     </td>
                     <td className="py-3 text-right">
                       <Link
                         to={`/runs/${r.run_id}`}
-                        className="inline-flex items-center gap-1 font-display text-body-em text-rui-blue hover:opacity-85"
+                        className="inline-flex items-center gap-1 font-display text-body-em text-fg underline decoration-edge-strong underline-offset-4 hover:text-accent"
                       >
                         Open <ArrowRight size={14} aria-hidden="true" />
                       </Link>
@@ -109,13 +115,19 @@ export function HistoryPage() {
 
       <section className="space-y-6">
         <h2 className="font-display text-section font-medium">Saved reports</h2>
-        <Card>
+        <Card className="overflow-x-auto">
           {reports.isLoading ? (
             <SkeletonTable rows={5} cols={4} />
+          ) : reports.error && !reports.data ? (
+            <EmptyState
+              icon={AlertTriangle}
+              title="Could not load reports"
+              description={String(reports.error)}
+            />
           ) : reports.data && reports.data.length > 0 ? (
             <table className="w-full text-left">
               <thead>
-                <tr className="text-muted font-display text-body-em uppercase tracking-wider text-xs">
+                <tr className="text-muted font-display text-body-em font-medium text-sm">
                   <th className="pb-4">Ticker</th>
                   <th className="pb-4">When</th>
                   <th className="pb-4">Decision</th>
@@ -128,7 +140,7 @@ export function HistoryPage() {
                     <td className="py-3 font-display text-feature">
                       {r.ticker}
                     </td>
-                    <td className="py-3 text-body text-muted">
+                    <td className="py-3 font-mono text-body text-muted">
                       {new Date(r.timestamp).toLocaleString()}
                     </td>
                     <td className="py-3">
@@ -141,7 +153,7 @@ export function HistoryPage() {
                     <td className="py-3 text-right">
                       <Link
                         to={`/reports/${encodeURIComponent(r.folder)}`}
-                        className="inline-flex items-center gap-1 font-display text-body-em text-rui-blue hover:opacity-85"
+                        className="inline-flex items-center gap-1 font-display text-body-em text-fg underline decoration-edge-strong underline-offset-4 hover:text-accent"
                       >
                         View <ArrowRight size={14} aria-hidden="true" />
                       </Link>

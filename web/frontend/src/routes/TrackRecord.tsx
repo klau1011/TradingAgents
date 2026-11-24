@@ -15,7 +15,7 @@ function AlphaCell({ alpha }: { alpha: string | null }) {
   if (!alpha) return <span className="text-muted">—</span>;
   const negative = alpha.trim().startsWith("-");
   return (
-    <span className={negative ? "text-rui-danger" : "text-rui-teal"}>
+    <span className={negative ? "text-bad" : "text-ok"}>
       {alpha}
     </span>
   );
@@ -25,7 +25,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
   return (
     <div>
       <p className="font-display text-nav text-muted">{label}</p>
-      <p className="font-display text-display-sm font-medium">{value}</p>
+      <p className="font-mono text-sub">{value}</p>
       {hint && <p className="text-body-em text-muted">{hint}</p>}
     </div>
   );
@@ -58,7 +58,7 @@ function TickerCard({ t }: { t: TrackRecordTicker }) {
   return (
     <Card className="space-y-6">
       <div className="flex flex-wrap items-baseline justify-between gap-4">
-        <h2 className="font-display text-display-sm font-medium">{t.ticker}</h2>
+        <h2 className="font-display text-card font-medium">{t.ticker}</h2>
         <p className="text-body-em text-muted">
           {t.scored > 0
             ? `${pct(t.hit_rate)} hit rate · ${t.hits}/${t.scored} scored`
@@ -78,7 +78,7 @@ function TickerCard({ t }: { t: TrackRecordTicker }) {
               <th className="py-2">Held</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="font-mono">
             {t.entries.map((e, i) => (
               // Date+rating is not unique: re-analysing an already-resolved date
               // appends a second entry that can share both. The occurrence index
@@ -86,11 +86,11 @@ function TickerCard({ t }: { t: TrackRecordTicker }) {
               <tr key={`${e.date}-${e.rating}-${i}`} className="border-t border-edge">
                 <td className="py-3 pr-6 whitespace-nowrap">{e.date}</td>
                 <td className="py-3 pr-6">
-                  <DecisionBadge decision={e.rating} preview />
+                  <DecisionBadge decision={e.rating} />
                 </td>
                 <td className="py-3 pr-6">
                   {e.pending ? (
-                    <span className="text-muted">pending</span>
+                    <span className="font-body text-muted">pending</span>
                   ) : (
                     e.raw ?? "—"
                   )}

@@ -11,9 +11,9 @@ export function Card({
 }) {
   const surface = dark
     ? "bg-inverse text-inverse-fg"
-    : "bg-canvas text-fg";
+    : "bg-surface text-fg";
   return (
-    <section className={`rounded-card ${surface} p-32p ${className}`}>
+    <section className={`rounded-card border border-edge ${surface} p-32p ${className}`}>
       {children}
     </section>
   );

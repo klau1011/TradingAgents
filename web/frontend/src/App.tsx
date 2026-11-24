@@ -1,7 +1,5 @@
 import { Suspense, lazy } from "react";
 import { Link, NavLink, Route, Routes, useLocation } from "react-router-dom";
-import { Moon, Sun } from "lucide-react";
-import { useTheme } from "./hooks/useTheme";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Skeleton, SkeletonText } from "./components/ui/Skeleton";
 
@@ -56,16 +54,16 @@ function RouteFallback() {
 
 function Header() {
   const link = ({ isActive }: { isActive: boolean }) =>
-    `font-display text-nav font-medium transition-opacity ${
+    `font-display text-nav font-medium whitespace-nowrap transition-opacity ${
       isActive ? "text-fg" : "text-muted hover:text-fg"
     }`;
   return (
     <header className="border-b border-edge bg-canvas">
-      <div className="mx-auto max-w-7xl px-32p py-6 flex items-center justify-between">
+      <div className="mx-auto max-w-7xl px-32p py-6 flex flex-wrap items-center justify-between gap-x-32p gap-y-3">
         <Link to="/" className="font-display text-nav font-medium tracking-tight text-fg">
           TradingAgents
         </Link>
-        <nav className="flex items-center gap-32p">
+        <nav className="flex items-center gap-6 md:gap-32p">
           <NavLink to="/" end className={link}>
             New run
           </NavLink>
@@ -75,7 +73,6 @@ function Header() {
           <NavLink to="/track-record" className={link}>
             Track record
           </NavLink>
-          <ThemeToggle />
         </nav>
       </div>
     </header>
@@ -89,25 +86,5 @@ function Footer() {
         TradingAgents Dashboard · Local
       </div>
     </footer>
-  );
-}
-
-function ThemeToggle() {
-  const { theme, toggle } = useTheme();
-  const isDark = theme === "dark";
-  return (
-    <button
-      type="button"
-      onClick={toggle}
-      aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-      title={isDark ? "Switch to light mode" : "Switch to dark mode"}
-      className="inline-flex items-center justify-center h-10 w-10 rounded-pill border-2 border-edge text-fg hover:opacity-85 transition-opacity focus:outline-none focus-visible:shadow-focus"
-    >
-      {isDark ? (
-        <Sun size={18} aria-hidden="true" />
-      ) : (
-        <Moon size={18} aria-hidden="true" />
-      )}
-    </button>
   );
 }

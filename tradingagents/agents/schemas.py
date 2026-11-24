@@ -274,9 +274,10 @@ class PortfolioDecision(BaseModel):
     confidence: Literal["low", "medium", "high"] = Field(
         default="medium",
         description=(
-            "Confidence in this rating given the strength of the evidence and how "
-            "much the risk analysts agreed. Use 'low' when the debate was unresolved "
-            "or evidence was thin, 'high' when the case is strong and corroborated."
+            "Confidence in this rating given the strength of the evidence. The risk "
+            "analysts argue assigned stances, so their agreement does not raise it "
+            "and their disagreement does not lower it. Use 'low' when evidence is "
+            "thin, 'high' when the case is strong and corroborated."
         ),
     )
 

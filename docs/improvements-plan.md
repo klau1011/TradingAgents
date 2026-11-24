@@ -106,5 +106,6 @@ pass-through test in `tests/test_reports_module.py`.
 - Web run persistence is JSON-per-run with no locking (single-process
   server); move to sqlite if multi-worker ever happens.
 - PR 5's behavior change (|alpha| retrieval + wider injection) has not been
-  measured with the PR 1 eval harness yet — run a before/after backtest when
-  spending eval budget next.
+  measured yet. Use `tradingagents backtest`, which keeps the memory log on;
+  the PR 1 `evaluate` harness sets `memory_log_path=None`
+  (`evaluation._isolated_config`), so it cannot show this change.

@@ -39,7 +39,7 @@ def create_aggressive_debator(llm):
 
 {trader_decision}
 
-Your task is to create a compelling case for the trader's decision by questioning and critiquing the conservative and neutral stances to demonstrate why your high-reward perspective offers the best path forward. Incorporate insights from the following sources into your arguments:
+Your task is to build the strongest evidence-based case for taking more upside exposure than the trader proposes, by questioning and critiquing the conservative and neutral stances to demonstrate why your high-reward perspective offers the best path forward. If the trader sells, argue for keeping more of the position; if the trader holds, argue for buying; if the trader buys, argue for a larger position. Do not simply endorse the trader's call. Incorporate insights from the following sources into your arguments:
 
 {instrument_context}
 {portfolio_context}
